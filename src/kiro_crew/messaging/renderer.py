@@ -139,7 +139,12 @@ def chunk_text(text: str, max_chars: int) -> list[str]:
     return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
 
 
-def chunk_for_transport(text: str, capabilities: TransportCapabilities) -> list[str]:
+def chunk_for_transport(
+    text: str,
+    capabilities: TransportCapabilities,
+    *,
+    redactor: Callable[[str], str] | None = None,
+) -> list[str]:
     """Split *text* into parts the transport will accept, in ITS unit.
 
     Prefers ``max_message_bytes`` when the platform declares one, because a
@@ -157,10 +162,23 @@ def chunk_for_transport(text: str, capabilities: TransportCapabilities) -> list[
     rewrites the ``**``/``#``/``- `` INSIDE the code -- and a sub-agent diff or
     cron log dump is exactly that shape. Callers that want a raw fixed-width cut
     reach for :func:`chunk_text` directly.
+
+    ``redactor`` is the credential grader threaded into the seam checks on both
+    paths. It defaults to ``_default_redactor``, but a COMPOSED host (a session
+    carrying companion-contributed credential patterns) must pass its own
+    ``redact_via_context``: the default pair does not know the companion patterns,
+    so a companion-only credential split across a seam would be graded by the
+    narrower pair and delivered whole across two adjacent messages. The Slack and
+    dashboard sinks already redact their DISPLAY text with ``redact_via_context``;
+    passing the same grader here keeps the seam check as wide as the display pass.
     """
     # Local imports: split.py is a heavier pure-Python module and only these
     # paths need it, so the renderer contract stays cheap to import.
     #
+    # ``redactor`` defaults to ``_default_redactor`` (resolved here, not as a def
+    # default, because that helper is defined below this function).
+    if redactor is None:
+        redactor = _default_redactor
     # ``getattr`` with the field's own ``0`` default, not attribute access: the
     # real ``TransportCapabilities`` always carries ``max_message_bytes``, but a
     # capabilities-shaped object from before the field existed must degrade to the
@@ -168,12 +186,39 @@ def chunk_for_transport(text: str, capabilities: TransportCapabilities) -> list[
     # default the dataclass declares.
     max_bytes = getattr(capabilities, "max_message_bytes", 0)
     if max_bytes > 0:
-        from kiro_crew.messaging.split import split_markdown_bytes
+        from kiro_crew.messaging.split import (
+            bounded_for_delivery,
+            chunk_utf8_bytes,
+            repaired_for_delivery,
+            split_markdown_bytes,
+        )
 
-        return split_markdown_bytes(text, max_bytes)
-    from kiro_crew.messaging.split import split_markdown_safe
+        # Graded after the split rather than during it: every caller of this helper
+        # sends each unit as its own message, so a boundary here is a seam between
+        # two messages a reader reads in order, and a key written across a line
+        # break is invisible to a per-message scan yet whole on screen once the
+        # break is gone. The byte splitter takes no redactor -- it reaches its
+        # budget by shrinking a CHARACTER limit and retrying, which a cut that may
+        # decline to cut would not terminate on -- so the guarantee is established
+        # on the sequence it produced. ``bounded_for_delivery`` grades only the
+        # slices IT cuts inside a chunk, never the splitter's own inter-chunk
+        # seams, so those seams are graded here with ``repaired_for_delivery`` --
+        # the same grade the char branch gets for free by threading the redactor
+        # INTO its splitter. A repair re-enters the SAME byte splitter: what comes
+        # back is a collapse fixed point no re-cut can reopen, so no second grade
+        # is owed.
+        pieces = split_markdown_bytes(text, max_bytes)
+        repaired = repaired_for_delivery(text, pieces, redactor)
+        if repaired is not None:
+            pieces = split_markdown_bytes(repaired, max_bytes)
+        return bounded_for_delivery(pieces, max_bytes, redactor, chunk_utf8_bytes)
+    from kiro_crew.messaging.split import bounded_for_delivery, split_markdown_safe
 
-    return split_markdown_safe(text, capabilities.max_message_chars)
+    units = split_markdown_safe(text, capabilities.max_message_chars, redactor=redactor)
+    # Bounded for the same reason every capped caller does it: the credential-aware
+    # cut is fail-closed and can answer with the text whole, and a transport that
+    # caps by slicing would drop that answer's tail after every scan has run.
+    return bounded_for_delivery(units, capabilities.max_message_chars, redactor)
 
 
 def cap_choices(

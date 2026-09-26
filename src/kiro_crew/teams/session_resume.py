@@ -335,6 +335,14 @@ def _replay_preview(raw: str) -> str:
 
     Split with the shared fence-safe splitter rather than sliced, so a preview cannot
     end inside a code fence and leave the rest of the message rendering as code.
+
+    No redactor here, deliberately: only ``chunks[0]`` is kept and truncated, so no
+    key can straddle two delivered messages -- there is no seam to grade. And a
+    credential-aware cut may DECLINE to cut, answering with the whole body as one
+    chunk, which would blow the preview's own budget once ``chunks[0]`` is kept.
+    ``safe`` is already display-redacted by ``_display_safe`` (a
+    ``redact_for_display`` wrapper), so the body carries the guarantee without the
+    splitter re-establishing it.
     """
     safe = _display_safe(raw).strip()
     if not safe:

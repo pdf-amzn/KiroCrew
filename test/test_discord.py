@@ -2232,6 +2232,146 @@ class TestRenderer:
         assert "\n\n-# Finished in " in cli.final_text()
 
     @pytest.mark.asyncio
+    async def test_a_late_reasoning_note_does_not_duplicate_streamed_text(self) -> None:
+        """Reasoning after streamed text must not re-post the answer already shown.
+
+        ``_flush_thinking`` posts the note as its own message below the live answer
+        bubble, sealing that bubble's segment first so ``_buf`` is consumed and the
+        live id cleared. The streamed answer is therefore shown exactly once: the
+        sealed bubble holds it, and the chunk after the note carries only new text.
+        """
+        cli = FakeClient()
+        r = DiscordRenderer(
+            cli, "chan1", DISCORD_CAPABILITIES, session_key="sk", show_thinking=True  # type: ignore[arg-type]
+        )
+        await r.on_turn_start()
+        await r.on_text_chunk("The answer is Foo. ")
+        await r.on_thinking("some private reasoning")
+        await r.on_text_chunk("And here is more.")
+        await r.on_done()
+        # Reconstruct what the reader actually sees: each message id in send order,
+        # with its FINAL text after any in-place edits (an edit updates a message
+        # already delivered, it is not a second message). The streamed sentence is
+        # streamed into one bubble and sealed there, so it appears on screen once;
+        # a second bubble carrying it below the note would show it twice.
+        mids: list[str] = []
+        final: dict[str, str] = {}
+        mid = 100
+        for text, _ in cli.sent:
+            mid += 1
+            key = str(mid)
+            mids.append(key)
+            final[key] = text
+        for edit_mid, text, _ in cli.edits:
+            final[edit_mid] = text
+        on_screen = [final[m] for m in mids]
+        assert sum(t.count("The answer is Foo.") for t in on_screen) == 1
+        # The reasoning note is its own delivered message.
+        assert any("💭" in t for t in on_screen)
+        # The later text is delivered, and does not re-prepend the shown answer.
+        assert any("And here is more." in t and "The answer is Foo." not in t for t in on_screen)
+
+    @pytest.mark.asyncio
+    async def test_reasoning_as_the_last_event_still_finalizes_the_answer(self) -> None:
+        """Reasoning that is the last event before on_done must not un-finalize.
+
+        text -> on_thinking -> on_done with no further chunk reaches
+        ``_flush_thinking`` from ``on_done`` itself. The note is still posted, but
+        the answer segment must NOT be sealed there: ``on_done`` still has to attach
+        the turn footer (and options/tables). Sealing early shipped the answer
+        without its footer AND left ``on_done`` an empty segment that posted a
+        spurious ``"…"`` placeholder message.
+        """
+        cli = FakeClient()
+        r = DiscordRenderer(
+            cli, "chan1", DISCORD_CAPABILITIES, session_key="sk", show_thinking=True  # type: ignore[arg-type]
+        )
+        await r.on_turn_start()
+        await r.on_text_chunk("The whole answer.")
+        await r.on_thinking("trailing reasoning")
+        await r.on_done()
+        mids: list[str] = []
+        final: dict[str, str] = {}
+        mid = 100
+        for text, _ in cli.sent:
+            mid += 1
+            mids.append(str(mid))
+            final[str(mid)] = text
+        for edit_mid, text, _ in cli.edits:
+            final[edit_mid] = text
+        on_screen = [final[m] for m in mids]
+        # The answer is delivered and carries the turn footer (it was finalized by
+        # on_done, not sealed early by the note flush).
+        assert any("The whole answer." in t and "\n\n-# Finished in " in t for t in on_screen)
+        # No spurious placeholder-only message.
+        assert not any(t.strip().startswith("…") for t in on_screen)
+        # The reasoning note is still delivered.
+        assert any("💭" in t for t in on_screen)
+
+    @pytest.mark.asyncio
+    async def test_a_trailing_note_is_not_the_predecessor_of_the_bubble_above_it(self) -> None:
+        """A note left above an un-sealed live bubble must not become its seam base.
+
+        On a trailing-reasoning turn the note is posted BELOW a still-live answer
+        bubble (the finalize path skips the seal, so ``_stream_mid`` stays on that
+        bubble). Recording the note as ``_sent_tail`` would make ``on_done``'s edit
+        of the bubble ABOVE it grade against the note, and a note tail + answer head
+        that join into a key would replace a leading span of VALID answer text with
+        a redaction tag. The note is recorded only when the next delivery lands
+        below it (``_stream_mid is None``).
+        """
+        cli = FakeClient()
+        r = DiscordRenderer(
+            cli, "chan1", DISCORD_CAPABILITIES, session_key="sk", show_thinking=True  # type: ignore[arg-type]
+        )
+        await r.on_turn_start()
+        await r.on_text_chunk("The answer body.")
+        await r.on_thinking("reasoning that arrives last")
+        # At this point a live bubble is still open above the just-posted note.
+        assert r._stream_mid is not None
+        # The note did NOT displace the answer bubble as the graded predecessor.
+        assert "💭" not in r._sent_tail
+        await r.on_done()
+        # And the finalized answer is intact (not corrupted by a note-seam grade).
+        mids: list[str] = []
+        final: dict[str, str] = {}
+        mid = 100
+        for text, _ in cli.sent:
+            mid += 1
+            mids.append(str(mid))
+            final[str(mid)] = text
+        for edit_mid, text, _ in cli.edits:
+            final[edit_mid] = text
+        on_screen = [final[m] for m in mids]
+        assert any("The answer body." in t for t in on_screen)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_seal_reports_not_landed_so_the_buffer_is_kept(self) -> None:
+        """A seal whose delivery fails must return False, not report success.
+
+        ``_flush_thinking`` (and any caller) discards ``_buf`` only on a True. If
+        ``_seal_current`` returned True after a chunk failed to land, the segment
+        the reader never saw would be dropped from any later delivery with no retry.
+        """
+        cli = FakeClient()
+        r = DiscordRenderer(cli, "chan1", DISCORD_CAPABILITIES, session_key="sk")  # type: ignore[arg-type]
+        r._buf = ["A segment that will fail to deliver."]
+        # No live message id: _seal_current takes the fresh-send path; force it to
+        # fail so nothing lands.
+        cli.fail_sends = True
+        landed = await r._seal_current(extract_uploads=False)
+        assert landed is False
+
+    @pytest.mark.asyncio
+    async def test_a_landed_seal_reports_true(self) -> None:
+        """The success path still returns True so the buffer is cleared normally."""
+        cli = FakeClient()
+        r = DiscordRenderer(cli, "chan1", DISCORD_CAPABILITIES, session_key="sk")  # type: ignore[arg-type]
+        r._buf = ["A segment that delivers cleanly."]
+        landed = await r._seal_current(extract_uploads=False)
+        assert landed is True
+
+    @pytest.mark.asyncio
     async def test_options_become_buttons_and_never_stream(self) -> None:
         r, cli = self._renderer()
         await r.on_turn_start()
