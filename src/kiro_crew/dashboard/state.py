@@ -5118,6 +5118,10 @@ class DashboardState:
         self._mcp_gateway_apply: Any = None  # async (enabled: bool) -> dict
         self._mcp_gateway_apply_stub: Any = None  # async () -> dict
         self._mcp_resolve_refresh: Any = None  # async () -> dict
+        # Slack socket owner's reconnect, wired by GatewayOrchestrator after
+        # dashboard init and read by POST /api/slack/reconnect. None on the
+        # API-only server and in tests, where the handler answers 503.
+        self._slack_reconnect: Any = None  # async () -> dict
         # Secretary subsystem removed; kept as permanent None for apps/routes.py
         # builtin-service restart lookup (getattr-based, no-op when None).
         self._secretary_restart: Any = None  # restart callback (always None — service removed)

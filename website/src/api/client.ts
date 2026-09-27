@@ -221,6 +221,7 @@ export type {
 export type {
   SlackConfigData,
   SlackConfigSave,
+  SlackReconnectResult,
   DiscordConfigData,
   TelegramConfigData,
   DiscordConfigSave,
