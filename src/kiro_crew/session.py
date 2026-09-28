@@ -3200,9 +3200,25 @@ class SessionManager:
 
     # ── Slack thread linking (persisted via SessionMap) ──
 
-    def set_slack_link(self, key: str, thread_ts: str, channel_id: str | None) -> None:
-        """Link a session to a Slack thread. Persists to session map."""
-        self._session_map.set_slack_link(key, thread_ts, channel_id)
+    def set_slack_link(
+        self, key: str, thread_ts: str, channel_id: str | None, *, generation: int | None = None
+    ) -> None:
+        """Link a session to a Slack thread. Persists to session map.
+
+        *generation* is the value of :meth:`slack_links_generation` a Slack
+        turn captured when its event arrived; a write that presents a stale
+        one is refused (``SessionMap.set_slack_link``). ``None`` is unfenced.
+        """
+        self._session_map.set_slack_link(key, thread_ts, channel_id, generation=generation)
+
+    def slack_links_generation(self) -> int:
+        """The current Slack-link generation (bumped by :meth:`clear_all_slack_links`).
+
+        A Slack turn reads it at receipt and hands it back to
+        :meth:`set_slack_link` / :meth:`set_channel`, so a link captured in
+        one workspace cannot be persisted after a switch to another.
+        """
+        return self._session_map.slack_links_generation()
 
     def get_slack_link(self, key: str) -> tuple[str | None, str | None]:
         """Return (thread_ts, channel_id) for a session."""
@@ -3416,6 +3432,26 @@ class SessionManager:
         """
         return self._session_map.clear_slack_link_if(key, channel_type, token)
 
+    def clear_all_slack_links(self) -> list[str]:
+        """Clear every persisted Slack thread binding; return the cleared session keys.
+
+        The workspace-switch sweep ``GatewayOrchestrator.reconnect_slack`` runs
+        before it publishes a client for a different workspace.
+        """
+        return self._session_map.clear_all_slack_links()
+
+    def snapshot_slack_links(self) -> list[dict[str, object]]:
+        """Copy every persisted Slack thread binding, as :meth:`restore_slack_links` takes it.
+
+        Taken by the workspace-switch sweep right before :meth:`clear_all_slack_links`,
+        so a switch whose identity record then cannot be written can undo the sweep.
+        """
+        return self._session_map.snapshot_slack_links()
+
+    def restore_slack_links(self, rows: list[dict[str, object]]) -> list[str]:
+        """Put a :meth:`snapshot_slack_links` copy back; return the restored keys."""
+        return self._session_map.restore_slack_links(rows)
+
     def clear_mirror_links_at(
         self, link: ChannelLink, *, reason: str = UNBIND_REASON_UNSPECIFIED
     ) -> list[str]:
@@ -3456,10 +3492,12 @@ class SessionManager:
         return self._session_map.is_mirror_paused(key, origin=origin)
 
     # Backward-compat aliases used by callers not yet migrated
-    async def set_channel(self, key: str, channel_id: str) -> None:
+    async def set_channel(
+        self, key: str, channel_id: str, *, generation: int | None = None
+    ) -> None:
         """Set channel for a session. Prefer set_slack_link for new code."""
         thread_ts, _ = self.get_slack_link(key)
-        self.set_slack_link(key, thread_ts or "", channel_id)
+        self.set_slack_link(key, thread_ts or "", channel_id, generation=generation)
 
     def get_channel(self, key: str) -> str | None:
         """Return the Slack channel ID for a session key, or None."""

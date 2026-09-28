@@ -15461,7 +15461,11 @@
         "reconnect_enterprise_validation_failed": "Dieser Slack-Workspace gehört nicht zu den erlaubten Enterprise-Organisationen. Aktualisiere unten die Liste und speichere, dann klicke auf „Erneut verbinden“.",
         "reconnect_denied_by_policy": "Eine Kanalrichtlinie auf diesem Rechner erlaubt Slack keine Verbindung.",
         "reconnect_failed_reason": "Erneutes Verbinden fehlgeschlagen: {{reason}}",
-        "saved_reconnect_and_restart": "Gespeichert. Klicke auf „Erneut verbinden“, um die Tokens zu übernehmen; der Slash-Befehl braucht weiterhin einen Gateway-Neustart."
+        "saved_reconnect_and_restart": "Gespeichert. Klicke auf „Erneut verbinden“, um die Tokens zu übernehmen; der Slash-Befehl braucht weiterhin einen Gateway-Neustart.",
+        "reconnect_previous_client_close_failed": "Die vorherige Slack-Verbindung konnte nicht geschlossen werden, daher wurde nichts geändert. Klicke noch einmal auf „Erneut verbinden“; wenn es weiter fehlschlägt, starte das Gateway neu.",
+        "reconnect_workspace_identity_unverified": "Slack hat nicht bestätigt, zu welchem Workspace diese Tokens gehören. Es wurde nichts verbunden und die gespeicherten Slack-Unterhaltungen bleiben erhalten. Klicke noch einmal auf „Erneut verbinden“.",
+        "reconnect_workspace_identity_unrecorded": "{{productName}} konnte nicht speichern, zu welchem Slack-Workspace diese Tokens gehören, daher wurde nichts verbunden. Prüfe, ob der {{productName}}-Datenordner beschreibbar ist, und klicke dann noch einmal auf „Erneut verbinden“.",
+        "reconnect_workspace_record_unreadable": "{{productName}} hat einen beschädigten Eintrag dazu gefunden, zu welchem Slack-Workspace die gespeicherten Unterhaltungen gehören, daher wurde nichts verbunden. Repariere oder entferne slack_workspace.json im {{productName}}-Datenordner und klicke dann noch einmal auf „Erneut verbinden“."
       },
       "sttSettings": {
         "language_auto": "Sprache automatisch erkennen",

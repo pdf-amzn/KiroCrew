@@ -2938,20 +2938,105 @@ dashboard token auth.
   403). Re-runs the Socket Mode handshake in place through
   `GatewayOrchestrator.reconnect_slack`: re-reads the credential store first
   (a store that cannot be read answers 500 and leaves the live socket
-  untouched), closes the old socket client, reassigns the boot-hoisted
-  `_app_token` / `_bot_token` / `_owner_id` and RECOMPUTES `_slack_enabled`
-  from the tokens now on disk (`init_socket_mode` early-returns on a stale
-  False and its own failure paths set it False, so without this a retry after
-  any earlier failure is a silent no-op), rebuilds the Web API client, then
-  awaits `init_socket_mode` + `_connect_slack` on the gateway loop. The
-  dashboard's Slack client mirror is cleared with the old socket and published
-  again only behind a connected one (a rejected workspace leaves it empty), and
-  the dashboard's `owner_id` follows the saved owner. Concurrent calls share
-  one in-flight attempt. Answers the GET's `connected` / `connect_error` pair;
-  the reconnect names its own declines
-  as `tokens_missing`, `owner_id_missing`, `enterprise_validation_failed` and
-  `denied_by_policy`, beside Slack's own codes (`invalid_auth`) and network
-  error class names. 503 on a server that owns no Slack socket (API-only).
+  untouched), closes the old socket client (a close that fails or times out
+  ABORTS the attempt with `previous_client_close_failed`: the old client stays
+  referenced for the next attempt or shutdown to close again, nothing from the
+  store is hoisted, and the handler module's owner / allowlist are cleared so
+  a listener that outlived its credentials accepts no privileged command),
+  reassigns the boot-hoisted `_app_token` / `_bot_token` / `_owner_id` and
+  RECOMPUTES `_slack_enabled` from the tokens now on disk (`init_socket_mode`
+  early-returns on a stale False and its own failure paths set it False, so
+  without this a retry after any earlier failure is a silent no-op), rebinds
+  the handler module's owner / allowlist to the saved owner in the same step
+  (`init_socket_mode` refreshes them only on the path that reaches a
+  handshake, so a reconnect that stops at `tokens_missing` or
+  `owner_id_missing` would otherwise leave the former owner bound), rebuilds
+  the Web API client, then awaits `init_socket_mode` + `_connect_slack` on the
+  gateway loop. The dashboard's Slack client mirror is cleared with the old
+  socket and published again only behind a connected one (a rejected workspace
+  leaves it empty), and the dashboard's `owner_id` follows the saved owner.
+  **Workspace identity.** Persisted Slack destinations (`SessionMap` thread /
+  channel links) name no workspace, so the gateway records the `auth.test`
+  `team_id` they were written under beside the session map
+  (`slack_workspace.json`, `_slack_links_team_id`) and, on every connected
+  handshake -- boot and reconnect alike, `_adopt_slack_workspace` -- compares
+  it with the workspace just validated. A different one is a SWITCH: every
+  persisted Slack link is swept (`SessionManager.clear_all_slack_links`) and
+  the sweep is awaited to disk (`aflush`) BEFORE the client is published, and
+  the identity is then PERSISTED and adopted in memory only once the write
+  succeeded, so a crash anywhere in between re-runs the sweep and retries the
+  record instead of restoring the former workspace's rows under the new client
+  (or, had the identity moved in memory first, letting the next boot take the
+  new workspace for a switch). A record write that FAILS undoes the sweep: the
+  rows are copied before they are cleared (`snapshot_slack_links`) and, the
+  former workspace still being the recorded one, put back and flushed
+  (`restore_slack_links`) before the attempt is refused with
+  `workspace_identity_unrecorded` -- an unwritable crew home must not cost the
+  mirrors of the workspace the install remains bound to. Links persisted under
+  NO recorded workspace -- every install that predates the record, on its
+  first boot after upgrading -- are KEPT; that handshake only records the
+  workspace. Sweeping there would end every live mirror on installs whose
+  workspace never changed, for the rare one that switched credentials while
+  stopped before the record existed: a pre-existing exposure the record
+  closes from its first boot on, not retroactively. A record that exists but
+  cannot be read is not taken for absent (that would skip the check once):
+  the attempt is refused with `workspace_record_unreadable` until the file is
+  repaired or removed, and the next Reconnect re-reads it (no restart).
+  The sweep also advances the session map's Slack-link generation:
+  a Slack turn captures `slack_links_generation()` when its event is received
+  (the Socket Mode listener's envelope entry, before its first await --
+  `events._links_generation_at_receipt` -- then through `_route_message`,
+  carried with the queued-turn entry and into both dispatch paths) and
+  presents it to every `set_slack_link` / `set_channel` it
+  performs, and a stale value is refused -- a turn received under the former
+  workspace and resumed after the switch cannot re-persist its thread. An
+  interactive callback is a Slack turn too: the listener hands the same
+  receipt value to `interactions.dispatch`, and the two callbacks that write
+  a link -- the session-resume choice and the link-to-dashboard button (also
+  reached as the `!link-to-dashboard` command through `handle_message`) --
+  check it after their awaits (`_slack_links_stale`) and skip BOTH the map
+  write and the dashboard link when it moved, since `dashboard_state.link_slack`
+  has no generation of its own to present and half a link is the two-owner
+  state the batched save exists to prevent. The record itself is a `config`
+  snapshot component file beside `session_map.json` (JSON-object validated on
+  restore): a backup restored onto a replacement host whose credentials name
+  another workspace then carries the identity its rows were written under,
+  and the first connected handshake there is a switch that sweeps them --
+  without the record the boot would read "first boot" and keep every row. A
+  handshake that connects but establishes NO identity (`auth.test` failed;
+  the default enterprise gate passes that open) while destinations of a known
+  workspace persist is refused: the new socket is torn down again and the
+  attempt fails with `workspace_identity_unverified`, since publishing would
+  run those destinations against credentials nobody checked. This is a
+  deliberate fail-closed trade: once an identity is recorded, a transient
+  `auth.test` failure at boot -- which the enterprise gate alone would have
+  tolerated -- now leaves Slack down until Reconnect or a restart, because a
+  silent switch is exactly what such a failure would look like. Only when no
+  identity was ever recorded is an unknown one accepted. A same-workspace
+  token rotation keeps every mirror. A record that cannot be written refuses
+  the same way (`workspace_identity_unrecorded`), as does a sweep whose flush
+  raises: `_bind_slack_workspace` retires the new socket rather than leave a
+  listener live on an unflushed sweep. Boot binds through the
+  identical step (`_bind_slack_workspace`), so both refusals tear the boot
+  socket down again and withdraw the dashboard mirror.
+  **Client affinity.** Work started under the previous client may still be in
+  flight when the live client is swapped: the listener binds the client an
+  envelope arrived through to that envelope's task context
+  (`slack.affinity.client_scope`; `_dispatch_queued` binds the queue entry's),
+  and `GatewayOrchestrator.slack` -- a property -- resolves to the bound
+  client inside it, so every `orch.slack` read an interaction, slash command,
+  message turn or the tasks they spawn make keeps answering through the
+  workspace whose destinations it holds; code outside any envelope (routes,
+  boot, cron) sees the live client.
+  Concurrent calls share one in-flight attempt. Answers the GET's `connected` /
+  `connect_error` pair; the reconnect names its own declines as
+  `tokens_missing`, `owner_id_missing`, `enterprise_validation_failed`,
+  `denied_by_policy`, `previous_client_close_failed`,
+  `workspace_record_unreadable`, `workspace_identity_unverified` and
+  `workspace_identity_unrecorded`, beside
+  Slack's own codes (`invalid_auth`)
+  and network error class names. 503 on a server that owns no Slack socket
+  (API-only).
 - `GET /api/slack/manifest` — public manifest template rendered with
   `?alias=` (default `kirocrew`, never `$USER`) plus Slack's one-click
   create deep link.

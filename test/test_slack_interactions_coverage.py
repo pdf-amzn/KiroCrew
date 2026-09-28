@@ -1474,13 +1474,17 @@ class TestResumeChoice:
             "C5",
             "🧵 *My session*\nSession resumed. Continue the conversation in this thread.",
         )
-        resume_orch.sessions.set_slack_link.assert_called_once_with("dashboard_s1", "ts1", "C5")
+        resume_orch.sessions.set_slack_link.assert_called_once_with(
+            "dashboard_s1", "ts1", "C5", generation=None
+        )
 
     @pytest.mark.asyncio
     async def test_dm_mode_opens_dm_and_links(self, resume_orch: MagicMock) -> None:
         await ix._handle_resume_choice(_payload(), _choice(), "C1", "m1", "U1", mode="dm")
         resume_orch.slack.open_dm.assert_awaited_once_with("U1")
-        resume_orch.sessions.set_slack_link.assert_called_once_with("dashboard_s1", "ts1", "D1")
+        resume_orch.sessions.set_slack_link.assert_called_once_with(
+            "dashboard_s1", "ts1", "D1", generation=None
+        )
 
     @pytest.mark.asyncio
     async def test_unknown_mode_returns_without_linking(self, resume_orch: MagicMock) -> None:

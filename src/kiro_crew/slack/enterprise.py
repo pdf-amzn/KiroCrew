@@ -723,6 +723,21 @@ def validated_self_bot_id() -> str:
     return _validated_self_bot_id
 
 
+def validated_team_id() -> str:
+    """The workspace ``team_id`` the last successful ``auth.test`` named ("" when none).
+
+    Zero-cost in-memory read. This is the workspace identity behind every Slack
+    destination the gateway has persisted since that validation -- a
+    ``SessionMap`` thread / channel binding carries no workspace of its own.
+    ``GatewayOrchestrator.reconnect_slack`` reads it before and after a
+    handshake and sweeps those bindings when the credentials it hoisted belong
+    to a different workspace, so a client for workspace B is never published
+    against destinations recorded under workspace A. Empty until the first
+    validation succeeds; cleared and re-set by each one.
+    """
+    return _validated_team_id
+
+
 def trusted_bot_admission(bot_id: str, trusted_ids: Container[str]) -> tuple[bool, str]:
     """Decide whether a bot-authored event is admitted, and why it is not.
 

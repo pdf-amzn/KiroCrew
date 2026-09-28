@@ -550,6 +550,13 @@ class SessionMap:
         self._path = config_dir() / SESSION_MAP_FILENAME
         self._data: dict[str, dict] = {}  # key → {"sid", "slack_thread_ts", "slack_channel_id"}
         self._thread_to_session: dict[str, str] = {}  # slack_thread_ts → session_key
+        # Bumped by every :meth:`clear_all_slack_links` (a Slack workspace
+        # switch). A writer that captured the value BEFORE the sweep holds a
+        # destination in the former workspace, and :meth:`set_slack_link`
+        # refuses its write when it presents that stale value -- see there.
+        # In-memory on purpose: it fences turns alive in THIS process; a
+        # restart has no in-flight turns to fence.
+        self._slack_links_generation = 0
         self._batch_depth = 0
         self._batch_dirty = False
         # Strong references to in-flight audit writes, so an executor Future is not
@@ -1577,8 +1584,17 @@ class SessionMap:
             )
         return evicted
 
+    def slack_links_generation(self) -> int:
+        """The current Slack-link generation (see :meth:`set_slack_link`).
+
+        Unguarded: a plain int read, taken at the top of a turn so the turn
+        can present it back when it links its thread."""
+        return self._slack_links_generation
+
     @_guarded
-    def set_slack_link(self, key: str, thread_ts: str, channel_id: str | None) -> None:
+    def set_slack_link(
+        self, key: str, thread_ts: str, channel_id: str | None, *, generation: int | None = None
+    ) -> None:
         """Link a session to a Slack thread. Creates entry if needed.
 
         A thread has at most one owner: a non-derived claim evicts every other
@@ -1601,7 +1617,34 @@ class SessionMap:
         un-disconnect a thread the user had muted, and later dashboard turns
         resumed delivering to it. Connecting does not rely on this: the dashboard
         row lifts a mute through :meth:`set_slack_paused`, not by re-linking.
+
+        *generation* fences the write against a Slack workspace switch. A Slack
+        turn captures :meth:`slack_links_generation` when its event is RECEIVED
+        and presents it here when it links its thread -- many awaits later,
+        after session acquisition and possibly a whole agent turn. In that gap
+        ``GatewayOrchestrator.reconnect_slack`` can validate credentials for
+        ANOTHER workspace and run :meth:`clear_all_slack_links`, which bumps
+        the generation; the resumed turn's *thread_ts* / *channel_id* then
+        name a destination in the workspace the sweep just retired, and
+        writing it would put a former-workspace destination back under the new
+        client -- exactly what the sweep removed. A stale generation is
+        refused and logged; the turn itself still answers through the client
+        that received it (``slack/events._route_message``), it just claims no
+        thread. ``None`` (the default) is an unfenced write: callers that are
+        not Slack turns -- the dashboard's connect row, migrations, the
+        non-Slack ``set_channel`` bookkeeping -- have no receipt to be stale.
         """
+        if generation is not None and generation != self._slack_links_generation:
+            logger.warning(
+                "session map: refused Slack link %s -> %s/%s captured under link "
+                "generation %d; the Slack workspace changed since (generation %d)",
+                key,
+                channel_id,
+                thread_ts,
+                generation,
+                self._slack_links_generation,
+            )
+            return
         key = canonical_key(key)
         entry = self._data.get(key)
         evicted = self._evict_rival_claimants(key, thread_ts) if thread_ts else []
@@ -2167,6 +2210,124 @@ class SessionMap:
         if key.startswith("dashboard:"):
             cleared = self.clear_slack_link(key[len("dashboard:") :]) or cleared
         return cleared
+
+    @_guarded
+    def clear_all_slack_links(self) -> list[str]:
+        """Clear EVERY persisted Slack thread binding; return the cleared keys.
+
+        A Slack binding names a thread and a channel but not the workspace they
+        live in -- the persisted fields predate any notion of more than one
+        workspace, and the bot token in the credential store was the only
+        identity there was. When that token is replaced by one for ANOTHER
+        workspace (``GatewayOrchestrator.reconnect_slack`` compares the
+        ``auth.test`` team ids before and after the handshake), every stored
+        destination now spells a channel in a workspace the new client cannot
+        reach: a dashboard turn on such a session posts into the void, and a
+        thread id the new workspace happens to reuse would resolve an inbound
+        reply to the wrong session through the reverse index. Both go together
+        with the bindings, before the new client is published.
+
+        A binding is a Slack binding iff it names a thread, exactly the test
+        :meth:`get_mirror_link` applies: ``set_channel`` parks a non-Slack
+        conversation's namespaced bucket in the legacy ``slack_channel_id``
+        field with no thread, and that bookkeeping is not a Slack destination
+        and is left alone. Each row goes through :meth:`clear_slack_link`, so
+        the reverse index, nonce and mute marker die with it. Runs under the
+        map lock as one unit: no reader observes half a sweep.
+
+        Also advances the link generation (see :meth:`set_slack_link`), in the
+        same critical section, so a turn that captured the old value before
+        the sweep cannot re-persist a former-workspace destination after it.
+        The bump happens even when nothing was persisted: the fence is about
+        the workspace having changed, not about how many rows named it.
+        """
+        self._slack_links_generation += 1
+        cleared: list[str] = []
+        for key in list(self._data):
+            entry = self._data.get(key)
+            if not entry or not entry.get("slack_thread_ts"):
+                continue
+            if self.clear_slack_link(key):
+                cleared.append(key)
+        return cleared
+
+    @_guarded
+    def snapshot_slack_links(self) -> list[dict[str, object]]:
+        """Copy every persisted Slack thread binding, as :meth:`restore_slack_links` takes it.
+
+        Exactly the rows :meth:`clear_all_slack_links` sweeps (a thread is what
+        makes a binding a Slack one), each with the fields the sweep removes:
+        ``slack_thread_ts``, ``slack_channel_id``, ``slack_link_nonce`` and the
+        ``slack_paused`` mute. Taken by the workspace-switch sweep in
+        ``GatewayOrchestrator._adopt_slack_workspace`` right before it clears,
+        so a switch whose identity record then cannot be written can put the
+        rows back instead of having deleted them for a workspace it never
+        adopted. Reads several fields per row as one unit, hence guarded.
+        """
+        rows: list[dict[str, object]] = []
+        for key, entry in self._data.items():
+            if not entry or not entry.get("slack_thread_ts"):
+                continue
+            row: dict[str, object] = {
+                "key": key,
+                "slack_thread_ts": entry.get("slack_thread_ts"),
+                "slack_channel_id": entry.get("slack_channel_id"),
+            }
+            for field in ("slack_link_nonce", "slack_paused"):
+                if field in entry:
+                    row[field] = entry[field]
+            rows.append(row)
+        return rows
+
+    @_guarded
+    def restore_slack_links(self, rows: list[dict[str, object]]) -> list[str]:
+        """Put bindings a :meth:`snapshot_slack_links` copy holds back; return the restored keys.
+
+        The undo of :meth:`clear_all_slack_links` for a workspace switch that
+        did NOT complete: ``_adopt_slack_workspace`` sweeps, flushes, and only
+        then records the new identity, and when that record cannot be written
+        the connect is refused with the FORMER workspace still the recorded
+        one -- so the swept rows still name destinations in the workspace this
+        install is bound to, and deleting them would have cost every mirror on
+        that workspace for a write that never happened. Rows are written back
+        field for field, not through :meth:`set_slack_link`: that path treats a
+        claim as new (evicts rivals, drops the mute, mints a nonce), while this
+        one restores a binding that was never legitimately removed. A row whose
+        session is gone stays gone, and a row whose session has since been
+        linked to another thread keeps the newer link. One ``_save()`` for the
+        whole restore, under the map lock, so no reader observes half of it.
+
+        The link generation is NOT moved back. It only fences writes captured
+        before a sweep, and a turn refused for having captured the pre-sweep
+        value writes the same binding again on its thread's next message; a
+        monotonic counter is what keeps that fence a one-line comparison.
+        """
+        restored: list[str] = []
+        for row in rows:
+            key = row.get("key")
+            thread_ts = row.get("slack_thread_ts")
+            if not isinstance(key, str) or not isinstance(thread_ts, str) or not thread_ts:
+                continue
+            entry = self._data.get(key)
+            if not entry or entry.get("slack_thread_ts"):
+                continue
+            entry["slack_thread_ts"] = thread_ts
+            channel_id = row.get("slack_channel_id")
+            if channel_id is not None:
+                entry["slack_channel_id"] = channel_id
+            for field in ("slack_link_nonce", "slack_paused"):
+                if field in row:
+                    entry[field] = row[field]
+            self._thread_to_session[thread_ts] = key
+            restored.append(key)
+        if restored:
+            self._save()
+            # Each row is a binding COMMITTED again after the sweep removed it, so
+            # the class recorder hears it like any other bind: without this the
+            # sweep's unbind is the last thing on record for a link that is live.
+            for key in restored:
+                self._note_bind(key)
+        return restored
 
     @_guarded
     def set_mirror_paused(self, key: str, paused: bool, *, origin: bool = False) -> bool:

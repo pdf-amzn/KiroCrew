@@ -181,8 +181,29 @@ COMPONENTS: dict[str, ComponentSpec] = {
     ),
     "config": ComponentSpec(
         policy=SecretPolicy.UNRESOLVED,
-        help="config.json, session_map.json, hooks.json, project_dir, workspace_dir",
-        files=("config.json", "session_map.json", "hooks.json", "project_dir", "workspace_dir"),
+        help=(
+            "config.json, session_map.json, slack_workspace.json, hooks.json, "
+            "project_dir, workspace_dir"
+        ),
+        # `slack_workspace.json` rides BESIDE `session_map.json`, never apart from it:
+        # it names the Slack workspace every persisted thread / channel binding in the
+        # map was written under (`slack.gateway.SLACK_WORKSPACE_STATE_FILENAME`). A
+        # bundle that carried the map without its record would restore workspace-A
+        # destinations onto a host whose credentials name workspace B with nothing
+        # beside them saying so, and the boot's switch detection -- which treats "no
+        # record" as a first boot and adopts whatever the handshake names -- would keep
+        # every stale row. With the record restored too, the first connected handshake
+        # on the new host sees the mismatch and sweeps them before the client is
+        # published. Same component as the map so a selective restore cannot separate
+        # the two.
+        files=(
+            "config.json",
+            "session_map.json",
+            "slack_workspace.json",
+            "hooks.json",
+            "project_dir",
+            "workspace_dir",
+        ),
     ),
     "skills": ComponentSpec(
         policy=SecretPolicy.UNRESOLVED,
@@ -318,6 +339,10 @@ COMPONENT_JSON_OBJECTS: frozenset[str] = frozenset(
         "crons.json",
         "config.json",
         "session_map.json",
+        # Its reader (`slack.gateway._load_slack_links_team_id`) takes anything that is
+        # not an object carrying a string `team_id` as a DAMAGED record and refuses the
+        # Slack boot, so a misshapen restore would silently take Slack down.
+        "slack_workspace.json",
         "hooks.json",
     }
 )
