@@ -312,7 +312,36 @@ def _default_main_repo_state() -> tuple[str, bool]:
 
 # Startup replaces this stat-only hint after the complete discovery chain runs.
 MAIN_REPO, MAIN_REPO_INFERRED = _default_main_repo_state()
+
+#: The resolved checkout's OWN default branch, resolved by
+#: ``_resolve_base_branch`` on the discovery attempt that resolves. ``main`` is the
+#: import-time value and the fallback: a repository that publishes no default branch
+#: and carries none of ``_LOCAL_BASE_CANDIDATES`` keeps it, which is the same answer
+#: every consumer read before any repository was known.
 BASE_BRANCH = "main"
+
+#: Whether the current :data:`BASE_BRANCH` was STATED by the repository rather than
+#: guessed from it. True for exactly ONE tier -- a remote's published ``HEAD`` -- because
+#: that is the only source that answers the question asked. False for the import-time
+#: default, for a conventional name merely EXISTING locally, and for the last-resort
+#: tier that publishes whatever branch happens to be checked out: a repository renamed
+#: to ``trunk`` ordinarily keeps a stale ``main``, so its existence states nothing.
+#:
+#: Read by MUTATIONS, which is the whole reason it exists. A wrong base is nearly
+#: free on a read -- the primary row carries a label, a behind-count goes unmeasured
+#: -- and unrecoverable on a rebase, which rewrites a worktree's commits onto
+#: ``{remote}/{BASE_BRANCH}`` and returns ``ok`` with no rollback path once the replay
+#: is clean. The last-resort tier's own trigger is ordinary: a checkout sitting on a
+#: feature branch is the normal state of a dev box, so on a repository publishing no
+#: remote HEAD and carrying neither candidate a ``/rebase`` would rebase onto
+#: ``origin/<that feature branch>`` -- and the branch it rewrites need not be the one
+#: checked out there.
+_BASE_BRANCH_POSITIVE = False
+
+#: Local branch names tried, in order, when no remote states a default. Both
+#: conventional names are needed: an older repository still carries the legacy name
+#: as its only default.
+_LOCAL_BASE_CANDIDATES = ("main", "master")  # wokeignore:rule=master
 
 # --- full discovery: once per process, or once per attempt while unresolved ---
 _DISCOVERY_DONE = False
@@ -488,12 +517,144 @@ async def ensure_main_repo_discovered() -> None:
             # the not-yet-loaded sentinel; the loader always assigns a dict, so an
             # operator with no helpers configured still latches at `{}`.
             await _load_trusted_credential_helpers()
+        # Resolved BEFORE the remote: remote resolution reads `branch.<base>.remote`
+        # and so needs the base branch name, while the base branch resolver needs no
+        # remote -- so the dependency runs one way only.
+        await _resolve_base_branch()
         # Both decline to cache when `_repo()` raises and cost no subprocess in that
         # case, so an unresolved attempt leaves them to the attempt that resolves.
         await _load_fallback_repos()
         await _upstream_remote()
         # The local, not the global: see the ratchet note in the docstring.
         _DISCOVERY_DONE = bool(discovered)
+
+
+# --- base branch resolution (replaces hardcoded 'main') ---
+
+# A branch name plausible enough to put in an argv. Anchored whole, so a name
+# carrying a space or a shell metacharacter is refused rather than quoted, and a
+# leading ``-`` cannot arrive where git would read it as an option. ``..`` is
+# excluded outright: it is the range separator every consumer here interpolates
+# around, so a branch containing it changes what `A..B` means.
+_BASE_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+
+
+def _plausible_branch_name(name: str) -> bool:
+    """Whether *name* is safe to interpolate into a git argv as a branch."""
+    return bool(name) and ".." not in name and bool(_BASE_BRANCH_RE.fullmatch(name))
+
+
+async def _resolve_base_branch() -> None:
+    """Resolve ``BASE_BRANCH`` to the resolved checkout's own default branch.
+
+    Read in the order the answer is trustworthy, and from ONE remote only. A
+    remote's published ``HEAD`` is the repository's own statement of which branch is
+    its default, but ``git remote`` lists names alphabetically, so consulting them in
+    listing order lets an archive or fork remote outvote ``origin``.
+    ``_upstream_remote`` resolves independently and falls back to ``origin``, so the
+    pair could then disagree and ``/rebase`` would rewrite a branch onto a base the
+    upstream never published. ``origin`` is therefore the only remote consulted, or
+    the sole remote of a checkout that has exactly one under another name.
+
+    The local candidates are the fallback, and they need no remote at all -- which
+    matters, because remote resolution reads ``branch.<base>.remote`` and therefore
+    cannot run before the base branch is known. A base taken from a local branch
+    composes with that read: ``_upstream_remote`` resolves the remote THAT branch
+    tracks.
+
+    A resolution that finds nothing at all leaves the value alone, so a process with
+    no readable checkout keeps ``main`` and every consumer reads the name it always
+    did. A readable checkout always answers something, because its own HEAD is the
+    final tier: a name that matches no ref is worse than a name that is merely not
+    the base, since ``{remote}/{base}`` is queried against it.
+
+    Each tier also records whether its answer is the repository's STATEMENT of its
+    default branch or this function's guess, in :data:`_BASE_BRANCH_POSITIVE`. Only
+    tier 1 states it; both fallbacks guess, and mutations refuse on a guess through
+    :func:`base_branch_mutation_refusal`. Reads are served either way -- being wrong
+    about the label costs a row's caption, being wrong about the rebase base costs
+    another worktree's commits.
+    """
+    global BASE_BRANCH, _BASE_BRANCH_POSITIVE
+    try:
+        repo = _repo()
+    except RepoUnavailable:
+        # No checkout to ask. Reaching git here would answer for whatever tree the
+        # backend happens to sit in, which is the hazard the accessor exists for.
+        return
+
+    remotes = await _git(repo, "remote", timeout=5)
+    names = remotes.split() if remotes else []
+    remote = "origin" if "origin" in names else (names[0] if len(names) == 1 else "")
+    if remote:
+        ref = await _git(repo, "symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD")
+        # Spelled ``<remote>/<branch>``, and the branch half may itself carry
+        # slashes, so only the FIRST separator belongs to the remote.
+        head = ref.split("/", 1)[1] if ref and "/" in ref else ""
+        if _plausible_branch_name(head):
+            # The repository's own statement of its default branch.
+            BASE_BRANCH = head
+            _BASE_BRANCH_POSITIVE = True
+            return
+    for candidate in _LOCAL_BASE_CANDIDATES:
+        if await _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{candidate}"):
+            # A conventional default that EXISTS here -- the best LABEL available when
+            # no remote states one, and still only a convention. NOT positive, because
+            # the repository has not said this is its default: a branch named `main`
+            # left behind by a rename to `trunk` is the ordinary residue of that
+            # rename, and `refs/remotes/origin/HEAD` is absent on any remote added by
+            # hand, so both halves of "stale candidate, no remote answer" are normal
+            # dev-box states rather than an exotic pairing. Trusting it would let a
+            # rebase rewrite a worktree onto `origin/main` while the real base is
+            # `trunk`, and the fetch cannot catch that because `origin/main` is still
+            # a fetchable ref.
+            BASE_BRANCH = candidate
+            _BASE_BRANCH_POSITIVE = False
+            return
+    # Last resort: the branch the checkout is actually on. A repository whose base is
+    # named something else entirely -- `trunk`, `develop` -- publishes no remote HEAD
+    # and carries neither candidate, and the alternative is keeping a name that names
+    # no ref: the primary row is labelled with it and `{remote}/{base}` is queried
+    # against it. It ranks BELOW the candidates because a checkout sitting on a
+    # feature branch is the ordinary state of a dev box, and a present `main` is the
+    # better answer there than whatever is checked out at this moment.
+    #
+    # Published as NOT positive for that same reason. It is the best label available
+    # and a fine answer for a read, but it is a guess about which branch is the base,
+    # and a rebase refuses rather than rewrite a worktree onto a guess.
+    checked_out = await _git(repo, "symbolic-ref", "--short", "HEAD") or ""
+    if _plausible_branch_name(checked_out):
+        BASE_BRANCH = checked_out
+        _BASE_BRANCH_POSITIVE = False
+
+
+def base_branch_mutation_refusal() -> str | None:
+    """Why a MUTATION must not act on :data:`BASE_BRANCH`, or ``None`` when it may.
+
+    The reason lives here, beside the flag, rather than at each mutation: a caller
+    reads one value and reports it, so a mutation added later cannot get the gate
+    subtly different, and there is one sentence to change.
+
+    A refusal is a REFUSAL and not a fallback to ``main``. Guessing here is the whole
+    hazard, and a same-named ref existing is not the escape it looks like: a ``main``
+    left behind by a rename to ``trunk`` is still fetchable, so ``{remote}/main``
+    resolves and the rebase rewrites the worktree onto a branch the repository stopped
+    using. The fetch cannot catch that, which is why the gate is here and not there.
+
+    Clears without a restart, because :func:`_rebase_locked` re-resolves the base
+    branch immediately before reading this: an operator who runs
+    ``git remote set-head <remote> -a`` is served on their next attempt.
+    """
+    if _BASE_BRANCH_POSITIVE:
+        return None
+    return (
+        f"refusing to rebase: no remote publishes a default branch for this checkout, "
+        f"so {BASE_BRANCH!r} is a guess -- a conventional name that merely exists here, "
+        f"or whatever branch is checked out. Rebasing onto it would rewrite this "
+        f"worktree's commits onto that guess, and the app names no undo once the replay "
+        f"is clean. Run `git remote set-head <remote> -a` in the checkout so the remote's "
+        f"own default is recorded; the next rebase re-resolves and needs no restart."
+    )
 
 
 # --- upstream remote resolution (replaces hardcoded 'origin') ---
@@ -571,8 +732,13 @@ def _normalize_repo_identity(url: str) -> tuple[str, str] | None:
       forges stays distinct.
 
     Returns None when no ``owner/repo`` can be extracted.
+
+    The query is cut before ``_REPO_PATH_RE``, which anchors on ``$``: a remote
+    carrying ``?access_token=...`` would otherwise keep its ``.git`` unstripped and
+    fold the token into the identity, so the same repository written with and
+    without a query would compare as two.
     """
-    url = url.strip()
+    url = runtime.remote_url_locator(url)
     m = _REPO_PATH_RE.search(url)
     if not m:
         return None
@@ -1312,14 +1478,20 @@ __all__ = (
     "RepoNotConfigured",
     "RepoUnavailable",
     "RepoUnreadable",
+    "_BASE_BRANCH_POSITIVE",
+    "_BASE_BRANCH_RE",
     "_CHECKOUT_DIR_NAMES",
     "_CHECKOUT_PARENT_DIRS",
     "_DIRTY_PATH_SAMPLE",
     "_FALLBACK_REPOS",
     "_LATCHED_CONFIGURED",
+    "_LOCAL_BASE_CANDIDATES",
     "_REPO_INVALID_MSG",
     "_REPO_PATH_RE",
     "_UPSTREAM_REMOTE",
+    "base_branch_mutation_refusal",
+    "_plausible_branch_name",
+    "_resolve_base_branch",
     "_candidate_checkouts",
     "_configured_main_repo",
     "_configured_main_repo_checked",

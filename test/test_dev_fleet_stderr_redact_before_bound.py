@@ -56,6 +56,9 @@ class TestRebaseConflictTailIsRedactedBeforeTheBound:
 
         monkeypatch.setattr(repository, "_git", _git)
         monkeypatch.setattr(runtime, "_run_cmd", _run_cmd)
+        # The base-branch gate sits before the fetch and would refuse first. This
+        # test is about the conflict output's redaction, so the base is STATED here.
+        monkeypatch.setattr(repository, "_BASE_BRANCH_POSITIVE", True)
 
         async def _remote() -> str:
             return "origin"
