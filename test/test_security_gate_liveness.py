@@ -69,12 +69,18 @@ def _url_payload_command(n: int) -> str:
 #: launch-approval directory and ``mcp/resolved``: gatewayd spawns an approved stub's
 #: backend outside the sandbox, so a session must not be able to write either path.
 #:
+#: Re-pinned again, from 27,761, for the ``panel-dismissals`` leaf added to
+#: ``_CREW_SECRET_LEAVES`` in ``paths.py``: one entry plus the comment stating why
+#: nothing a run can reach may forge or delete the operator's dismissal records.
+#: Ten lines, all of them the fence declaration and its reason -- no new control
+#: logic and no new matching pass.
+#:
 #: The number IS the package's measured total, carrying no spare room: a ratchet with
 #: headroom admits exactly the unreviewed growth it exists to catch, so the next line
 #: added here fails this gate and has to be re-pinned deliberately, with its reason
 #: written above. The guards that detect a monolith growing back are the per-file cap
 #: and the facade's share below, and both must stay untouched.
-_PACKAGE_LINE_BUDGET = 27_761
+_PACKAGE_LINE_BUDGET = 27_771
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
