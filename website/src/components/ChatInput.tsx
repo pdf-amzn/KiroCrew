@@ -628,6 +628,11 @@ interface ChatInputProps {
   continuing?: boolean
   isQueued?: boolean
   stopState?: 'idle' | 'soft_pending' | 'killing'
+  /** An automatic context compaction is running on this session. The busy
+   *  branch then renders a non-destructive "compacting" state in place of the
+   *  armed Stop button: a Stop here cancels the compaction, not a turn, and the
+   *  backend declines it (#14841). The turn/steer controls are untouched. */
+  compacting?: boolean
   approvalMode?: string
   reasoningEffort?: string
   /** True when `reasoningEffort` is the configured default rather than a
@@ -1007,6 +1012,7 @@ function ChatInput({
   continuing = false,
   isQueued = false,
   stopState,
+  compacting = false,
   approvalMode,
   reasoningEffort,
   effortIsDefault = false,
@@ -4818,7 +4824,28 @@ function ChatInput({
                 steer path: a host without onStop (the side panel — stopping the
                 main turn from there would be misdirected) still needs the
                 split steer/queue button while a turn runs. */}
-            {(isRunning || stopState === 'soft_pending' || stopState === 'killing') && (onStop || (canSteer && onSteer)) ? (
+            {compacting && (!stopState || stopState === 'idle') ? (
+              // An automatic compaction holds the session. It is NOT a turn
+              // (`isRunning` is false), so without this branch the composer
+              // read idle and the only affordance was Send. The button is the
+              // Stop button's shape with the spinner, disabled: pressing Stop
+              // here would cancel the compaction and the backend declines it
+              // (#14841), so an inert control that says why beats one that
+              // appears to work and does nothing. Yields to an in-flight
+              // stop (soft_pending / killing), which the user already chose.
+              <div className="flex items-center gap-1.5" data-testid="compacting-indicator">
+                <button
+                  className="w-8 h-8 rounded-lg bg-transparent border-none text-muted flex items-center justify-center cursor-not-allowed transition-all"
+                  disabled
+                  title={i18nT('components.chatInput.compacting_context_stop_unavailable')}
+                  aria-label={i18nT('components.chatInput.compacting_context_stop_unavailable')}
+                  data-testid="stop-button-compacting"
+                >
+                  <Loader2 size={18} className="animate-spin" />
+                </button>
+                <span className="text-xs text-muted whitespace-nowrap" role="status" aria-live="polite" data-testid="compacting-hint">{i18nT('components.chatInput.compacting_context')}</span>
+              </div>
+            ) : (isRunning || stopState === 'soft_pending' || stopState === 'killing') && (onStop || (canSteer && onSteer)) ? (
               stopState === 'killing' ? (
                 killingEscaped ? (
                   <div className="flex items-center gap-1.5">

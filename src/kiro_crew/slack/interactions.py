@@ -47,6 +47,7 @@ from kiro_crew.security import (
     redact_exfiltration_urls,
 )
 from kiro_crew.sel import sel
+from kiro_crew.session_lifecycle import STOP_DECLINED_COMPACTING_TEXT
 from kiro_crew.slack.allowlist import (
     ACTION_ALLOWLIST_APPROVE,
     ACTION_ALLOWLIST_DENY,
@@ -2531,6 +2532,8 @@ async def _handle_stop_confirm(payload: dict, channel: str, msg_ts: str, user_id
         # fired — dismiss the stale ephemeral with a "Nothing running" message.
         if outcome == "idle":
             await _update_ephemeral([], "Nothing running.")
+        elif outcome == "compacting":
+            await _update_ephemeral([], STOP_DECLINED_COMPACTING_TEXT)
         sel().log_tool_invocation(
             session_key=thread_ts,
             source="slack",
@@ -3223,9 +3226,10 @@ async def _handle_inline_stop(
                 pass
 
     outcome = await _orch.sessions.stop_turn(session_key, on_soft=_on_soft, on_hard=_on_hard)
-    if outcome == "idle" and _orch.slack and channel and msg_ts:
+    if outcome in ("idle", "compacting") and _orch.slack and channel and msg_ts:
+        text = "⏹ Nothing running." if outcome == "idle" else STOP_DECLINED_COMPACTING_TEXT
         try:
-            await _orch.slack.update_message(channel, msg_ts, text="⏹ Nothing running.")
+            await _orch.slack.update_message(channel, msg_ts, text=text)
         except Exception:
             pass
     sel().log_tool_invocation(

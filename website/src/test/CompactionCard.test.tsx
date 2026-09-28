@@ -88,6 +88,12 @@ describe('parseCompactionNotice', () => {
       status: 'notice',
       text: 'This turn has produced nothing for 12 min.',
     })
+    // ⏹ leads the "ended by Stop" notice (#14841): a status, never a failure,
+    // so it must not fall into ErrorNotice's failure chrome.
+    expect(parseCompactionNotice('\u23F9 Compaction at 87% was ended by Stop. The session was not restarted for it.')).toMatchObject({
+      status: 'notice',
+      text: 'Compaction at 87% was ended by Stop. The session was not restarted for it.',
+    })
     // Only a LEADING glyph is stripped; one inside the copy is content.
     expect(parseCompactionNotice('see the \u{1F504} marker').text).toBe('see the \u{1F504} marker')
   })

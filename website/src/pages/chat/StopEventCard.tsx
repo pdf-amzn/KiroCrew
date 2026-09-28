@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { motion } from 'framer-motion'
-import { Square, XOctagon } from 'lucide-react'
+import { Loader2, Square, XOctagon } from 'lucide-react'
 import type { ChatMessage } from '../../types'
 
 import { i18nT } from '../../i18n/t'
@@ -25,6 +25,27 @@ export default memo(function StopEventCard({ message }: { message: ChatMessage }
         <Square size={13} fill="currentColor" className="lucide-inline" aria-hidden="true" />
         {i18nT('pages.chat.stopEventCard.stopping')}
       </motion.div>
+    )
+  }
+
+  if (state === 'stop_declined_compacting') {
+    // The press landed while the session's own automatic /compact held it, and
+    // the backend declined the Stop rather than fail the compaction and restart
+    // the session (#14841). Nothing was stopped, so this is a status row in
+    // the muted palette, not a danger row: the user did nothing wrong and the
+    // session is fine. Same shape as the other states so the chip the press
+    // opened settles in place instead of being replaced.
+    return (
+      <div
+        role="status"
+        aria-label={i18nT('pages.chat.stopEventCard.stop_declined_compacting')}
+        className="text-muted text-[13px] leading-5 font-mono px-3 py-2 rounded-md bg-muted/15 inline-flex items-center gap-2"
+        data-testid="stop-event-card"
+        data-state={state}
+      >
+        <Loader2 size={13} className="lucide-inline animate-spin" aria-hidden="true" />
+        {i18nT('pages.chat.stopEventCard.stop_declined_compacting_2')}
+      </div>
     )
   }
 

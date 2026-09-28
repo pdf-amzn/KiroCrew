@@ -68,6 +68,7 @@ from kiro_crew.security import (
 )
 from kiro_crew.sel import sel
 from kiro_crew.session import unlink_queued_temp_paths
+from kiro_crew.session_lifecycle import STOP_DECLINED_COMPACTING_TEXT
 from kiro_crew.skills import SkillsLoader
 from kiro_crew.slack.allowlist import prompt_track_channel, send_dashboard_link
 from kiro_crew.slack.blocks import (
@@ -2702,6 +2703,8 @@ async def _route_message(
             # fired — dismiss the stale "Stopping…" ephemeral explicitly.
             if outcome == "idle" and orch.slack:
                 await orch.slack.post_message(channel, "Nothing running.", stop_post_ts)
+            elif outcome == "compacting" and orch.slack:
+                await orch.slack.post_message(channel, STOP_DECLINED_COMPACTING_TEXT, stop_post_ts)
             sel().log_tool_invocation(
                 session_key=session_key,
                 source="slack",

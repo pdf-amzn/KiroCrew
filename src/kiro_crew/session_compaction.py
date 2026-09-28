@@ -59,6 +59,15 @@ COMPACT_OUTCOME_RESTARTED_UNCOMPACTABLE = "restarted_uncompactable"
 #: A compaction failed and the restart is held: sub-agents still run on this session's
 #: process, and restarting it now would end them. Sent with ``success=False``.
 COMPACT_OUTCOME_WAITING_FOR_SUBAGENTS = "waiting_for_subagents"
+#: The in-flight compaction was ended by a user Stop, not by the harness. Sent with
+#: ``success=False``. A separate value because the failure arm's other destination is
+#: a RECYCLE, and a Stop the user pressed must never read as "compaction didn't
+#: succeed, so the session was restarted": the session is not recycled on this
+#: outcome, the cooldown is armed and the next threshold reading retries.
+COMPACT_OUTCOME_CANCELLED = "cancelled"
+
+#: Fired when *key* enters or leaves the compacting set, with the new membership.
+CompactingCallback = Callable[[str, bool], None]
 
 
 class CompactCallback(Protocol):
@@ -91,6 +100,10 @@ class CompactionState:
     #: recycles, and is re-seeded from slot persistence after a restart.
     pct_overrides: dict[str, float] = field(default_factory=dict)
     on_compacted: CompactCallback | None = None
+    #: Observer of the ``compacting`` set, so a surface can show a compaction WHILE
+    #: it runs rather than only announce its verdict. Synchronous and fail-soft: it
+    #: is called from the same tick that commits the membership change.
+    on_compacting_changed: CompactingCallback | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,9 +180,13 @@ class _CompactionOwner(Protocol):
         self, key: str, pct_before: float, pct_after: float, *, expect: Any | None
     ) -> bool: ...
 
-    async def _fire_compact_callback(self, key: str, pct: float, *, success: bool) -> None: ...
+    async def _fire_compact_callback(
+        self, key: str, pct: float, *, success: bool, outcome: str | None = None
+    ) -> None: ...
 
     def mark_needs_reinjection(self, key: str) -> None: ...
+
+    def stop_generation(self, key: str) -> int: ...
 
     def _lifecycle_boundary(self) -> Any: ...
 
@@ -334,7 +351,7 @@ class CompactionCoordinator:
         self._deps.logger.warning("Session %s compacting — context at %.0f%% (awaited)", key, pct)
         # There is deliberately no await between the membership check in the
         # gate and this commit; that is the event-loop dedup handshake.
-        self.state.compacting.add(key)
+        self._set_compacting(key, True)
         return await owner._compact_session(key, pct)
 
     def set_compact_callback(self, cb: CompactCallback | None) -> None:
@@ -344,6 +361,73 @@ class CompactionCoordinator:
                 "Compact callback already registered; replacing existing handler"
             )
         self.state.on_compacted = cb
+
+    def set_compacting_callback(self, cb: CompactingCallback | None) -> None:
+        """Register the observer of the compacting set (see ``CompactionState``)."""
+        self.state.on_compacting_changed = cb
+
+    def is_compacting(self, key: str) -> bool:
+        """Whether a compaction is in flight on *key* (folded or not)."""
+        return key in self.state.compacting or self._owner._fold_key(key) in self.state.compacting
+
+    def _set_compacting(self, key: str, on: bool) -> None:
+        """The ONE writer of ``state.compacting``: commit, then tell the observer.
+
+        Membership is committed before the observer runs, so a reader the observer
+        wakes (a slot broadcast) sees the same answer ``is_compacting`` gives. The
+        observer is a surface concern and may not fail a compaction, so it is
+        guarded; a no-op transition (already in, already out) is not reported.
+        """
+        was = key in self.state.compacting
+        if on:
+            self.state.compacting.add(key)
+        else:
+            self.state.compacting.discard(key)
+        if was == on:
+            return
+        cb = self.state.on_compacting_changed
+        if cb is None:
+            return
+        try:
+            cb(key, on)
+        except Exception:
+            self._deps.logger.debug("compacting observer failed for %s", key, exc_info=True)
+
+    def _stop_generation(self, key: str) -> int:
+        """The user-Stop counter for *key*; 0 when the owner cannot answer.
+
+        Read before and after a compaction turn: a rise means a Stop landed on
+        the session while its ``/compact`` ran, which is the one failure cause
+        the failure arm must NOT answer with a recycle. Fail-soft to 0 so an
+        owner double without the counter degrades to "no Stop seen".
+        """
+        probe = getattr(self._owner, "stop_generation", None)
+        if not callable(probe):
+            return 0
+        try:
+            return int(probe(key))
+        except Exception:
+            return 0
+
+    async def _settle_cancelled(self, key: str, pct: float) -> str:
+        """The verdict for a compaction ended by a user Stop: cooldown, no recycle.
+
+        The session keeps whatever the Stop left of it (a soft stop keeps the
+        process; a hard stop already reset it and respawned its successor), and
+        the next confirmed threshold reading retries after the cooldown. What
+        this arm must not do is what the generic failure arm does: recycle the
+        provider and tell the user compaction "didn't succeed".
+        """
+        self._deps.logger.warning(
+            "Session %s compaction ended by a user Stop at %.0f%% — cooldown, no recycle",
+            key,
+            pct,
+        )
+        self.state.cooldown_until[key] = time.monotonic() + self._deps.compact_failure_cooldown_secs
+        await self._owner._fire_compact_callback(
+            key, pct, success=False, outcome=COMPACT_OUTCOME_CANCELLED
+        )
+        return "cancelled"
 
     def mark_needs_reinjection(self, key: str) -> None:
         """Flag the live session to restore skill context on its next turn."""
@@ -519,7 +603,7 @@ class CompactionCoordinator:
         self._deps.logger.warning("Session %s compacting — %s", key, reason)
         # Keep check-and-add synchronous so the awaited trigger cannot commit
         # a second attempt in the same event-loop turn.
-        self.state.compacting.add(key)
+        self._set_compacting(key, True)
         task = asyncio.create_task(owner._compact_session(key, pct))
         owner._background_tasks.add(task)
         task.add_done_callback(owner._background_tasks.discard)
@@ -606,11 +690,14 @@ class CompactionCoordinator:
                         await claude_session.provider.compact()
 
                 timeout = self._deps.compact_wait_timeout_secs()
+                stop_gen = self._stop_generation(key)
                 try:
                     # One budget covers both waiting for a live turn and the
                     # compact call itself.
                     await asyncio.wait_for(_run_compact(), timeout=timeout)
                 except (Exception, asyncio.TimeoutError) as exc:
+                    if self._stop_generation(key) > stop_gen:
+                        return await self._settle_cancelled(key, pct)
                     if isinstance(exc, asyncio.TimeoutError):
                         self._deps.logger.error(
                             "Compact timed out after %.0fs for %s", timeout, key
@@ -664,7 +751,7 @@ class CompactionCoordinator:
             self._deps.logger.exception("Session compaction/recycle failed for %s", key)
             return "failed"
         finally:
-            self.state.compacting.discard(key)
+            self._set_compacting(key, False)
 
     async def _recycle_held(
         self, key: str, session: Any, pct: float, *, uncompactable: bool = False
@@ -913,6 +1000,9 @@ class CompactionCoordinator:
 
         started = time.monotonic()
         result_wait_used: float | None = None
+        # Read AFTER the semaphore is held: a Stop that landed while this waited
+        # for the turn ended THAT turn, not this compaction.
+        stop_gen = self._stop_generation(key)
         try:
 
             async def _run() -> None:
@@ -951,6 +1041,13 @@ class CompactionCoordinator:
                 _run(), timeout=timeout + self._deps.compact_result_wait_margin_secs
             )
         except (Exception, asyncio.TimeoutError):
+            if self._stop_generation(key) > stop_gen:
+                # A user Stop ended the ``/compact`` turn. That is not the harness
+                # failing to compact, and answering it with the recycle below is
+                # the bug this arm used to have: the user pressed Stop on what
+                # looked like a stalled turn and lost the session's memory to a
+                # restart the notice then blamed on compaction (#14841).
+                return await self._settle_cancelled(key, pct)
             self._deps.logger.warning(
                 "Session %s in-place /compact failed after %.0fs — recycling "
                 "(semaphore held; async status wait %s)",
@@ -962,7 +1059,12 @@ class CompactionCoordinator:
             await self._await_cotenants(key, pct)
             return await self._restart_held(key, session, pct)
         finally:
-            session.semaphore.release()
+            # A hard Stop that landed on this compaction's turn already popped
+            # the session and released its permit to wake waiters
+            # (``_wake_turn_waiters``); this permit was that one. Releasing again
+            # raises out of the compaction and hides the cancelled verdict.
+            if session.semaphore.locked():
+                session.semaphore.release()
 
         escalate = self._owner._settle_compact_cooldown(key, session.provider, pct)
         self._deps.logger.info("Compacted session %s in place (context overflow)", key)
@@ -1101,8 +1203,15 @@ class CompactionCoordinator:
             )
         return did_reset
 
-    async def _fire_compact_callback(self, key: str, pct: float, *, success: bool) -> None:
-        """Mark reinjection and invoke the compact callback, swallowing errors."""
+    async def _fire_compact_callback(
+        self, key: str, pct: float, *, success: bool, outcome: str | None = None
+    ) -> None:
+        """Mark reinjection and invoke the compact callback, swallowing errors.
+
+        *outcome* names the verdict when the caller knows something this method
+        cannot derive from the recycling marker -- today only a user-cancelled
+        compaction. Left ``None`` on every other path, where the marker decides.
+        """
         # Every compaction that reached a verdict passes here, whether or not a
         # callback is registered, so this is where the counter belongs: the early
         # return below would otherwise drop the surfaces that register none.
@@ -1123,7 +1232,9 @@ class CompactionCoordinator:
         # indistinguishable from a compaction, and the dashboard announced one as the
         # other -- "Auto-compacted at N%." on a session whose history had just been
         # discarded, which is the untruth this whole change set out to remove.
-        if not recycled:
+        if outcome is not None:
+            pass
+        elif not recycled:
             outcome = COMPACT_OUTCOME_COMPACTED
         elif key in self.state.uncompactable_recycles:
             # Consumed HERE, at the end of the recycle that set it: the marker's whole

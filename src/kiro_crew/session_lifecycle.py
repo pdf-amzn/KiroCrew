@@ -57,7 +57,19 @@ _END_REASON_SID_RETAINED = "destroyed_sid_retained"
 #: Not a real key, and never logged as one: it only has to be non-None so the claim
 #: is withheld, because an unreadable map is not evidence of revocation.
 _SID_RETENTION_UNKNOWN = "<unreadable session map>"
-StopOutcome = Literal["soft", "hard", "idle"]
+#: ``compacting`` is the one outcome that changed nothing: a cooperative Stop
+#: arrived while the session's own ``/compact`` turn held it, and cancelling that
+#: turn would have failed the compaction and recycled the session (#14841). The
+#: caller tells the user, and the compaction finishes or times out on its own.
+#: A ``force`` stop is never answered this way -- it is the user's escape hatch.
+StopOutcome = Literal["soft", "hard", "idle", "compacting"]
+
+#: What a channel says for the ``compacting`` outcome. One string, so every
+#: surface that declines the Stop declines it in the same words.
+STOP_DECLINED_COMPACTING_TEXT = (
+    "⏳ Compacting context — nothing was stopped. The compaction finishes on its own "
+    "in a few minutes; send your message afterwards."
+)
 ProviderFactory = Callable[..., Any]
 _ANY_SESSION = object()
 
@@ -2507,6 +2519,14 @@ class SessionLifecycleService:
         logger = self._deps.logger
         key = owner._fold_key(key)
         session = owner._sessions.get(key)
+        # BEFORE the Stop is recorded: a Stop this method declines is not a Stop
+        # the turn saw, and recording it would make the compaction path below
+        # read its own later failure as user-cancelled. ``getattr`` because the
+        # owner protocol does not declare the compacting set; a double without it
+        # keeps the old behaviour.
+        if not force and session is not None and key in getattr(owner, "_compacting", ()):
+            logger.info("stop_turn outcome=compacting session=%s (cooperative stop declined)", key)
+            return "compacting"
         # Record the Stop against the session key before anything is awaited:
         # the runner's end-of-turn gates may run as soon as the provider's
         # cancel lands, and `prev_turn_cancelled` (set only after the ack) is

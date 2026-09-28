@@ -933,7 +933,7 @@ def _provider_has_unfinished_turn(provider: LLMProvider) -> bool:
     return res is True
 
 
-StopOutcome = Literal["soft", "hard", "idle"]
+StopOutcome = Literal["soft", "hard", "idle", "compacting"]
 
 
 class FirstTurnState(Enum):
@@ -2607,6 +2607,14 @@ class SessionManager:
         """Register the compaction completion callback."""
         self._compaction.set_compact_callback(cb)
 
+    def set_compacting_callback(self, cb: Callable[[str, bool], None] | None) -> None:
+        """Register the observer told when a session enters or leaves compaction."""
+        self._compaction.set_compacting_callback(cb)
+
+    def is_compacting(self, key: str) -> bool:
+        """Whether an automatic compaction is in flight on *key* right now."""
+        return self._compaction.is_compacting(key)
+
     def mark_needs_reinjection(self, key: str) -> None:
         """Mark a live session for one-shot context reinjection."""
         self._compaction.mark_needs_reinjection(key)
@@ -2888,9 +2896,11 @@ class SessionManager:
             key, pct_before, pct_after, expect=expect
         )
 
-    async def _fire_compact_callback(self, key: str, pct: float, *, success: bool) -> None:
+    async def _fire_compact_callback(
+        self, key: str, pct: float, *, success: bool, outcome: str | None = None
+    ) -> None:
         """Delegate compaction callback dispatch."""
-        await self._compaction._fire_compact_callback(key, pct, success=success)
+        await self._compaction._fire_compact_callback(key, pct, success=success, outcome=outcome)
 
     async def _fire_recycle_callback(self, key: str, *, reason: str) -> None:
         """Dispatch a lifecycle recycle callback through the lifecycle boundary."""

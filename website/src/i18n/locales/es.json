@@ -6233,6 +6233,8 @@
       "session_control_ready": "Listo",
       "session_control_chip_label": "{{label}} — {{detail}}",
       "agent_inherited_default": "Esta sesión sigue el agente predeterminado ({{name}}). No tiene un agente propio, así que cambia si cambia el predeterminado. Haz clic para fijar uno.",
+      "compacting_context": "Compactando el contexto…",
+      "compacting_context_stop_unavailable": "Compactando el contexto — no se puede detener hasta que termine",
       "model_inherited_default": "Esta sesión usa el modelo predeterminado ({{name}}). No tiene un modelo propio, así que cambia si cambia el predeterminado. Haz clic para fijar uno."
     },
     "chatPane": {
@@ -10567,6 +10569,8 @@
         "menu_crewlog_desc": "Qué hizo esta sesión y cuánto costó: estado, consumo, cronología, herramientas, aprobaciones"
       },
       "stopEventCard": {
+        "stop_declined_compacting": "Detención rechazada, compactación en curso",
+        "stop_declined_compacting_2": "[Compactando — detención rechazada]",
         "stop_failed_session_reset": "No se pudo detener, sesión restablecida",
         "stop_failed_session_reset_2": "[No se pudo detener, sesión restablecida]",
         "stopped": "Detenido",

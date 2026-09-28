@@ -1922,6 +1922,8 @@
       "auto_compact_at": "Auto-compact at",
       "auto_compact_threshold": "Auto-compact threshold",
       "auto_compact_load_failed": "Couldn't load the auto-compact setting",
+      "compacting_context": "Compacting context…",
+      "compacting_context_stop_unavailable": "Compacting context — Stop is unavailable until it finishes",
       "reset_to_global": "Reset to global ({{pct}}%)",
       "following_global": "Following global ({{pct}}%)",
       "optimize_failed": "Couldn't optimize the prompt. Your original text was restored.",
@@ -4599,6 +4601,10 @@
         "rate_right": "Jev read this compaction right",
         "rate_wrong": "Jev read this compaction wrong",
         "not_scored": "(+{{count}} not scored)"
+      },
+      "stopEventCard": {
+        "stop_declined_compacting": "Stop declined, compaction in progress",
+        "stop_declined_compacting_2": "[Compacting — Stop declined]"
       }
     },
     "chatPage": {

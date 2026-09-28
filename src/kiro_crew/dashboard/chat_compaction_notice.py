@@ -34,6 +34,7 @@ from kiro_crew.messaging.link import SLACK_NAMESPACE, channel_namespace_of
 from kiro_crew.platform.context import PlatformCompositionError
 from kiro_crew.platform.governance_profiles import vet_and_audit
 from kiro_crew.session_compaction import (
+    COMPACT_OUTCOME_CANCELLED,
     COMPACT_OUTCOME_COMPACTED,
     COMPACT_OUTCOME_RECYCLED,
     COMPACT_OUTCOME_RESTARTED_UNCOMPACTABLE,
@@ -60,21 +61,36 @@ CHANNEL_COMPACT_FAILED_NOTICE = (
     "Context reached {pct:.0f}% but auto-compact failed. It retries after a "
     "cooldown — send {cmd} to compact now, or {new_cmd} to start fresh."
 )
+#: A user Stop ended the compaction turn. Claims nothing about the session's
+#: memory: after a soft stop the process is intact, after a hard stop the stop
+#: already said the session was reset.
+CHANNEL_COMPACT_CANCELLED_NOTICE = (
+    "Compaction at {pct:.0f}% was ended by a stop. The session was not restarted for "
+    "it; compaction retries after a cooldown, or send {cmd} to compact now."
+)
+#: Shared tail of both restart notices. The successor's first turn IS built from a
+#: recent excerpt of the transcript (``ContextBuilder`` thread history), so "no
+#: longer remembers them" was false in the direction that hurt: a user who believes
+#: the context is gone has no reason to ask the agent to pick the work back up
+#: (#14841).
+_CHANNEL_RESTART_MEMORY_TAIL = (
+    "The messages above are still here, and the agent's next reply starts from a "
+    "recent excerpt of them rather than the whole thing. Send {new_cmd} any time to "
+    "start fresh yourself."
+)
 #: The session was REPLACED after a compaction that could have worked failed. Says
 #: what happened rather than claiming a summary, and names the loss the user would
 #: otherwise discover by asking the agent something it cannot recall.
 CHANNEL_RESTART_NOTICE = (
     "Context reached {pct:.0f}% and compaction didn't succeed, so this session was "
-    "restarted. The messages above are still here; the agent no longer remembers "
-    "them. Send {new_cmd} any time to start fresh yourself."
+    "restarted. " + _CHANNEL_RESTART_MEMORY_TAIL
 )
 #: The same restart where NOTHING could have compacted it. Only this one names the
 #: missing capability: the notice above is reached by backends that have compaction
 #: and failed once, and telling those users their backend cannot compact is false.
 CHANNEL_RESTART_UNCOMPACTABLE_NOTICE = (
     "Context reached {pct:.0f}% and this backend cannot compact at all, so this "
-    "session was restarted. The messages above are still here; the agent no longer "
-    "remembers them. Send {new_cmd} any time to start fresh yourself."
+    "session was restarted. " + _CHANNEL_RESTART_MEMORY_TAIL
 )
 
 #: Manual fallbacks differ per channel: the bang-prefixed transports own their
@@ -110,6 +126,9 @@ def notice_text(
     """
     if outcome == COMPACT_OUTCOME_WAITING_FOR_SUBAGENTS:
         return CHANNEL_COMPACT_WAITING_NOTICE.format(pct=pct)
+    if outcome == COMPACT_OUTCOME_CANCELLED:
+        compact_cmd, _ = _MANUAL_COMMANDS.get(namespace, _DEFAULT_COMMANDS)
+        return CHANNEL_COMPACT_CANCELLED_NOTICE.format(pct=pct, cmd=compact_cmd)
     if not success:
         compact_cmd, new_cmd = _MANUAL_COMMANDS.get(namespace, _DEFAULT_COMMANDS)
         return CHANNEL_COMPACT_FAILED_NOTICE.format(pct=pct, cmd=compact_cmd, new_cmd=new_cmd)

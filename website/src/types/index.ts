@@ -1157,6 +1157,11 @@ export interface ChatSlot {
   interrupted?: boolean
   // Soft-stop state machine
   stop_state?: 'idle' | 'soft_pending' | 'killing'
+  /** An automatic context compaction holds the session right now. Not a turn,
+   * so `running` stays false while it runs, which is exactly what made it look
+   * like a stall worth pressing Stop on (#14841). The composer shows it and
+   * the Stop button becomes a warning while it is set. */
+  compacting?: boolean
   /** In-flight `wait` tool sleep, absent when nothing is sleeping. `deadline_ts`
    * is absolute seconds on the BACKEND clock (Date.now() / 1000 territory), so
    * the transcript can count down against it and survive a page reload;

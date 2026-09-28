@@ -27,6 +27,7 @@ import type { ChatMessage } from '../../types'
  *   🔄 Auto-compacted at N%.                  threshold auto-compact, success
  *   ♻️ This session was recycled …           watchdog recycle notice
  *   ⏳ This turn has produced nothing …       stuck-turn notice
+ *   ⏹ Compaction at N% was ended by Stop …  a Stop landed on the /compact turn
  *
  * Only the first is a document worth folding: on kiro-cli `<summary>` is the
  * backend's whole context digest (Goal / Status / Technical / Decisions …),
@@ -75,8 +76,9 @@ const FAILED_LEAD_RE =
 // icons beside the lucide glyph (AUTOSDE no-emoji-as-icons). Stripped here,
 // where the writer set is known; the tone stays info — none is a warning.
 // ⏳ is U+23F3 (HOURGLASS WITH FLOWING SAND), the glyph state.py writes — not
-// U+231B (⌛ HOURGLASS).
-const STATUS_LEAD_RE = /^\s*(?:\u{1F504}|\u267B|\u23F3)\uFE0F*\s*/u
+// U+231B (⌛ HOURGLASS). ⏹ is U+23F9, the lead on the "compaction ended by
+// Stop" notice (#14841): a status, not a failure, so it lands here.
+const STATUS_LEAD_RE = /^\s*(?:\u{1F504}|\u267B|\u23F3|\u23F9)\uFE0F*\s*/u
 
 export function parseCompactionNotice(content: string): ParsedCompaction {
   const raw = content ?? ''

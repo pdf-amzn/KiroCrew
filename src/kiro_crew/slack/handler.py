@@ -153,6 +153,7 @@ from kiro_crew.security import (
 )
 from kiro_crew.sel import sel
 from kiro_crew.session import _CIRCUIT_BREAKER_THRESHOLD, SessionClosingError, SessionManager
+from kiro_crew.session_lifecycle import STOP_DECLINED_COMPACTING_TEXT
 from kiro_crew.slack.blocks import build_working_blocks, deprecation_warning_block
 from kiro_crew.slack.client import SlackClientOps
 from kiro_crew.slack.format import (
@@ -1888,6 +1889,8 @@ async def _handle_slash_command(
         # fired — dismiss the stale "Stopping…" ephemeral explicitly.
         if outcome == "idle":
             await slack.post_message(channel, "Nothing running.", reply_ts)
+        elif outcome == "compacting":
+            await slack.post_message(channel, STOP_DECLINED_COMPACTING_TEXT, reply_ts)
         sel().log_tool_invocation(
             session_key=session_key,
             source="slack",

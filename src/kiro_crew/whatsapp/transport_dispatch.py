@@ -43,6 +43,7 @@ from kiro_crew.messaging.driver import APPROVAL_INTERACTIVE
 from kiro_crew.messaging.inbound_spool import InboundRoute
 from kiro_crew.messaging.link import build_dm_session_key, seed_generation
 from kiro_crew.messaging.transport import InboundMessage
+from kiro_crew.session_lifecycle import STOP_DECLINED_COMPACTING_TEXT
 from kiro_crew.whatsapp.commands import (
     COMPACT_AUTO_TEXT,
     COMPACT_BUSY_TEXT,
@@ -298,7 +299,11 @@ class WhatsAppDispatcher:
         except Exception:  # noqa: BLE001: the queue clear below still applies
             logger.warning("whatsapp: stop_turn failed", exc_info=True)
             outcome = None
-        stopped = str(getattr(outcome, "kind", outcome) or "") in ("soft", "hard")
+        kind = str(getattr(outcome, "kind", outcome) or "")
+        if kind == "compacting":
+            await self._say(scope, STOP_DECLINED_COMPACTING_TEXT)
+            return
+        stopped = kind in ("soft", "hard")
         await self._say(scope, STOPPED_TEXT if stopped else STOP_NOTHING_RUNNING_TEXT)
 
     async def _handle_compact(self, scope: str) -> None:
