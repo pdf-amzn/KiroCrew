@@ -4531,7 +4531,7 @@ def _resolve_stop_event(slot: _ChatSlot, outcome: str) -> None:
         final_state = "stopped"
     elif outcome == "compacting":
         # Nothing was stopped: the session's own /compact turn held it and a
-        # cooperative Stop was declined (#14841). The card becomes the notice,
+        # cooperative Stop was declined. The card becomes the notice,
         # so the row the press opened tells the user what happened to it.
         final_state = "stop_declined_compacting"
     else:
@@ -5109,9 +5109,9 @@ async def stop_slot_turn(
     # A cooperative Stop while the session's own automatic /compact holds it is
     # DECLINED, before any of the soft-stop side effects below run. Cancelling
     # that turn fails the compaction, and the failure arm recycles the session:
-    # the user pressed Stop on what looked like a stalled turn and lost the
-    # session's memory to a restart the notice then blamed on compaction
-    # (#14841). The card the press would have opened is opened and settled in
+    # a user who pressed Stop on what looked like a stalled turn would lose the
+    # session's memory to a restart the notice then blames on compaction.
+    # The card the press would have opened is opened and settled in
     # one step, so the press still leaves a visible answer in the transcript.
     # A force stop (second press, or ?force=true) is the escape hatch and is
     # never declined; ``stop_turn`` repeats this check for the race in which a

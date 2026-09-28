@@ -1043,10 +1043,10 @@ class CompactionCoordinator:
         except (Exception, asyncio.TimeoutError):
             if self._stop_generation(key) > stop_gen:
                 # A user Stop ended the ``/compact`` turn. That is not the harness
-                # failing to compact, and answering it with the recycle below is
-                # the bug this arm used to have: the user pressed Stop on what
-                # looked like a stalled turn and lost the session's memory to a
-                # restart the notice then blamed on compaction (#14841).
+                # failing to compact, and the recycle below must not answer it: a
+                # user who presses Stop on what looks like a stalled turn would
+                # lose the session's memory to a restart the notice then blames
+                # on compaction.
                 return await self._settle_cancelled(key, pct)
             self._deps.logger.warning(
                 "Session %s in-place /compact failed after %.0fs — recycling "

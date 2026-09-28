@@ -333,8 +333,8 @@ class SlotProjection:
             "running": slot.turn_running,
             # An automatic compaction in flight on this session. Separate from
             # `running` because it is NOT a dashboard turn: the composer reads
-            # idle while it holds the session, which is what made it look like a
-            # stall worth pressing Stop on (#14841).
+            # idle while it holds the session, which without this field looks
+            # like a stall worth pressing Stop on.
             "compacting": bool(getattr(slot, "_compacting", False)),
             "orchestrating": slot._in_stage_execution,
             "queue_depth": slot.queue_depth,

@@ -59,7 +59,7 @@ _END_REASON_SID_RETAINED = "destroyed_sid_retained"
 _SID_RETENTION_UNKNOWN = "<unreadable session map>"
 #: ``compacting`` is the one outcome that changed nothing: a cooperative Stop
 #: arrived while the session's own ``/compact`` turn held it, and cancelling that
-#: turn would have failed the compaction and recycled the session (#14841). The
+#: turn would fail the compaction and recycle the session. The
 #: caller tells the user, and the compaction finishes or times out on its own.
 #: A ``force`` stop is never answered this way -- it is the user's escape hatch.
 StopOutcome = Literal["soft", "hard", "idle", "compacting"]

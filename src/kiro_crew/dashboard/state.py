@@ -1269,9 +1269,9 @@ _AUTO_COMPACT_NOTICE = "🔄 Auto-compacted at {pct:.0f}%."
 #: this -- is answerable only if the notice said what actually occurred.
 #: Both restart notices end in ``_RESTART_MEMORY_TAIL`` because that sentence is
 #: what the successor actually does: its first turn is built from a recent excerpt
-#: of this transcript (``ContextBuilder`` thread history), so "no longer remembers
-#: it" was false in the direction that hurt -- a user who believes the context is
-#: gone for good has no reason to ask the agent to pick the work back up (#14841).
+#: of this transcript (``ContextBuilder`` thread history). Naming the excerpt is
+#: the point: a user who believes the context is gone for good has no reason to
+#: ask the agent to pick the work back up.
 _RESTART_MEMORY_TAIL = (
     "The conversation above is still here, and the agent's next reply starts from a "
     "recent excerpt of it rather than the whole thing."
@@ -3189,7 +3189,7 @@ class _ChatSlot:
         # slot's session. Written by the compacting observer wired in
         # ``wire_session_compact_callback`` and read by the slot projection, so
         # the composer can show the compaction while it runs and the Stop button
-        # can warn before a press that would fail it (#14841). Not persisted:
+        # can warn before a press that would fail it. Not persisted:
         # a compaction never outlives the gateway process.
         self._compacting: bool = False
         self._stop_state_raw: str = "idle"  # 'idle' | 'soft_pending' | 'killing'
@@ -5719,7 +5719,7 @@ class DashboardState:
 
         def _on_compacting_changed(key: str, on: bool) -> None:
             # The slot learns the compaction is RUNNING, not only how it ended:
-            # the composer shows it and the Stop button warns on it (#14841).
+            # the composer shows it and the Stop button warns on it.
             # Synchronous, from the tick that committed the membership change,
             # so the broadcast that follows agrees with ``is_compacting``.
             from kiro_crew.dashboard.chat_utils import dashboard_slot_key

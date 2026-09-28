@@ -1,10 +1,10 @@
 """A user Stop during an automatic compaction neither fails it nor restarts the session.
 
-The report behind these tests (#14841): a long-running dashboard session looked
-stalled, the user pressed Stop, and the dashboard answered "Compaction didn't succeed
-at 87%, so the session was restarted instead." Nothing had shown a compaction was
-running, the Stop cancelled the ``/compact`` turn, and the failure arm recycled the
-process. Four things pin the fix here:
+The scenario: a long-running dashboard session looks stalled, the user presses Stop
+while an automatic ``/compact`` turn holds it. Without these guarantees the Stop
+cancels that turn, the failure arm recycles the process, and the dashboard answers
+"Compaction didn't succeed, so the session was restarted instead" for a Stop the
+user pressed. Four things pin the behaviour:
 
 1. ``stop_turn`` DECLINES a cooperative Stop while the key is compacting and does
    not record it as a Stop the turn saw; a force stop still goes through.
@@ -13,7 +13,7 @@ process. Four things pin the fix here:
    provider NOT shut down, notice says so -- instead of recycling.
 3. The compacting set is observable: an observer is told on enter and leave, and the
    dashboard slot payload carries ``compacting`` so the composer can show it.
-4. The restart notices no longer claim the agent remembers nothing.
+4. The restart notices name the transcript excerpt the successor starts from.
 
 Fakes only: a mock provider whose ``/compact`` blocks until released or raises, no
 real harness.

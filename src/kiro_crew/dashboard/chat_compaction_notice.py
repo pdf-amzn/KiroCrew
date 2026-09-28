@@ -69,10 +69,9 @@ CHANNEL_COMPACT_CANCELLED_NOTICE = (
     "it; compaction retries after a cooldown, or send {cmd} to compact now."
 )
 #: Shared tail of both restart notices. The successor's first turn IS built from a
-#: recent excerpt of the transcript (``ContextBuilder`` thread history), so "no
-#: longer remembers them" was false in the direction that hurt: a user who believes
-#: the context is gone has no reason to ask the agent to pick the work back up
-#: (#14841).
+#: recent excerpt of the transcript (``ContextBuilder`` thread history), so the
+#: notice names that excerpt: a user who believes the context is gone for good has
+#: no reason to ask the agent to pick the work back up.
 _CHANNEL_RESTART_MEMORY_TAIL = (
     "The messages above are still here, and the agent's next reply starts from a "
     "recent excerpt of them rather than the whole thing. Send {new_cmd} any time to "
