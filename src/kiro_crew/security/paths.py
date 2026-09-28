@@ -913,11 +913,11 @@ _KEYSTONE_ARTIFACT_PARENTS: list[str] = sorted(
 # shared read+write gate, and reading config.json is routine and intended (the
 # dashboard file viewer, ``cat``, and knowledge indexing all read it). We
 # instead block only WRITES, at the agent file-edit tool gate
-# (hooks.on_tool_call), via ``is_sensitive_write_path``. This is defense in
-# depth on top of the loader's load-time clamp, which already neutralizes any
-# inflated on-disk value no matter how it was written. The operator edits config
-# out-of-band (dashboard config API / CLI), which do NOT route through this
-# gate, so legitimate config changes still work.
+# (hooks.on_tool_call), via ``is_sensitive_write_path``. That gate sees only the
+# file-edit tool, so the load-bearing seal is the OS sandbox mounting both files
+# read-only (``sandbox._CREW_READONLY_LEAVES``). The operator edits config from
+# outside the sandbox (dashboard config API / CLI in their own terminal), so
+# legitimate config changes still work.
 # (The denied-command opt-out state does NOT live here — it is a security
 # ceiling and lives on the read+write keystone floor in ``denied_commands.json``
 # above, so no bash-level write matcher is needed for it. The computer-use primary

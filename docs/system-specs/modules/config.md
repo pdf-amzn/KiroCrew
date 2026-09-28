@@ -1442,6 +1442,37 @@ Windows it also applies a real owner-only DACL via
 `platform_compat.restrict_to_owner` (`restrict_on_error="warn"`, so a DACL that
 cannot be applied warns rather than making the config unwritable).
 
+**One exception: on Linux the two sealed files are written in place.** The OS
+sandbox seals `config.json` and `config.local.json` read-only
+(`sandbox._CREW_READONLY_LEAVES`; see security.md), and on Linux that seal is a
+per-file bind mount pinned to the INODE it was made over. A tmp+rename would put a
+new, unsealed inode at the name for every sandbox already running, so
+`_publishes_in_place()` routes exactly those two paths (by `realpath`, the same set
+`cli_config._names_sealed_config` decides the CLI hint from) to
+`_write_config_in_place()` — and nothing else: macOS (Seatbelt seals by path),
+Windows, and every non-config document (an agent spec written through the same
+function) keep the rename. The in-place writer reads the old bytes first and
+publishes brace-last (`_install_brace_last`): byte 0 becomes a space, the rest of
+the payload is written from byte 1, the file is truncated to the new length, and
+the opening `{` is written back last, then fsynced. A reader racing the write can
+therefore see the old document, the new one, or a parse failure — never a
+parseable hybrid of a new prefix and an old tail, which two pretty-printed
+documents of the same shape would otherwise produce and which would start a
+session on a settings pair nobody saved. On a failed write, truncate or fsync it
+puts the old bytes back the same brace-last way — or removes the file when this
+save created it, since an empty file parses as corrupt rather than absent — and
+re-raises; if
+the mtime did not strictly advance it bumps it one nanosecond past the prior value
+so `_config_fingerprint()` still busts. Accepted residuals, Linux and these two
+files only: a SIGKILL or power loss during the write itself cannot be rolled back
+(a rename would have left the old document); a coarse-timestamp filesystem
+truncates the nanosecond bump, so ctime and size are what remain to bust the
+fingerprint; a hard link to either file is updated along with it; and a reader
+racing the write has a four-syscall window in which the file does not parse,
+which `read_config_for_update()` fails closed on rather than writing back and
+which `KiroCrewConfig.load()` re-reads once (`_read_config_text`) before it marks
+the file degraded. Pinned by `test_sandbox_config_seal.py`.
+
 That is a reversal of an earlier ruling recorded here, and the reason it changed
 is worth keeping: the lockdown used to shell out to `icacls`, a blocking
 subprocess this function could not afford because it runs inside async request
@@ -1930,8 +1961,10 @@ Consequences, and they are the point:
   silently-inert bug this design exists to kill, now with the settings UI
   affirming that the value took effect.
 - **A reload that can widen approvals is audited.** `HookManager` follows
-  `hooks.*` live, and `config.json` is writable by an auto-approved agent shell,
-  so its applier SEL-logs an `auto_approve_tools` / `auto_approve_sources` /
+  `hooks.*` live, and `config.json` — sealed read-only against an in-sandbox agent
+  shell — is still written by every settings surface outside the seal (the config
+  PATCH, the operator CLI, an unsandboxed spawn), so its applier SEL-logs an
+  `auto_approve_tools` / `auto_approve_sources` /
   `auto_approve_subagent_*` change (`hook_manager.reconfigure`,
   `auto_approve_changed`, counts and flag names only) the way the channel
   transports audit an allow-list reload. Governance still caps the resulting
@@ -2338,8 +2371,8 @@ to a closed vocabulary is not user-authored text, and masking it would break the
 reaction while destroying nothing an attacker could have put there.
 
 Anything else — a non-dict, an unknown `kind`, a ghost override carrying no
-trait, motion or sound that survives validation — collapses to `{}` on load (config.json is hand-editable and
-agent-writable, so junk must never crash the load), while the endpoints answer a
+trait, motion or sound that survives validation — collapses to `{}` on load (config.json is hand-editable,
+so junk must never crash the load), while the endpoints answer a
 non-empty raw value the coercer collapses with 400 `invalid_avatar` — except a
 well-formed ghost override whose traits all coerce to absent, which is the
 validator's own all-empty → reset rule rather than caller junk and so stores as
@@ -2408,10 +2441,12 @@ Consent to send message text and skill descriptions to Jev lives **outside
 
 `endpoint` is the `provider.endpoint` the owner consented to; the gate sends only
 while the configured endpoint still equals it, because that field is in this
-agent-writable file too. Same reasoning as `computer_use.json` above: `config.json` is a `VISIBLE` leaf the
-agent's shell can write, and every `decisions.*` field is hot-applied by the live
-watcher, so an `enabled` toggle here would let a prompt-injected agent start the
-egress of its own conversation without a restart. Reads fail soft to `{}` → **not
+same settings file. Same reasoning as `computer_use.json` above: `config.json` is
+sealed read-only against an in-sandbox agent shell (`sandbox._CREW_READONLY_LEAVES`;
+see security.md) but remains an ordinary settings file every config writer reaches
+without an owner gate, and every `decisions.*` field is hot-applied by the live
+watcher, so an `enabled` toggle here would be one settings edit away from starting
+the egress of the owner's conversation without a restart. Reads fail soft to `{}` → **not
 consented**, and only a literal `true` consents. The only writer is the owner-only,
 browser-called `PUT /api/decisions/consent` (`dashboard/handlers/decisions.py`);
 `PATCH /api/config/kirocrew` refuses `decisions.enabled`, and an `enabled` key written

@@ -345,6 +345,8 @@ keystone paths are still refused). The CLI is the stricter of the two.
 
 ## Configuration
 
+Reads work from inside the agent sandbox, but the sandbox seals `config.json` and `config.local.json` read-only. Commands that write config (`config set`, `config edit`, `config defaults --adopt`/`--keep`, `telemetry enable`/`disable`, `workspace add`/`update`/`delete`, `crew delete`) must be run by the user in their own terminal or done in the dashboard (Settings); do not run them yourself.
+
 | Command | Description |
 |---------|-------------|
 | `kirocrew config get` | Show all config |

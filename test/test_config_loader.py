@@ -3646,10 +3646,17 @@ class TestConfigCache:
         assert second.agent.model == "model-bbbb"
 
     def test_atomic_replacement_identity_busts_same_size_fingerprint(self, tmp_path: Path) -> None:
-        """Atomic mode writes differ even when legacy fingerprint fields match."""
+        """Atomic mode writes differ even when legacy fingerprint fields match.
+
+        Pinned to the tmp+rename publish: ``config_path()`` is patched at
+        ``cfg_file``, which on Linux would make it one of the two sealed files and
+        route it through the in-place writer (same inode by design), so
+        ``IS_LINUX`` is forced off to keep this a rename-identity test.
+        """
         import os as _os
         from unittest.mock import patch
 
+        from kiro_crew import platform_compat
         from kiro_crew.config.loader import (
             _config_fingerprint,
             update_config_locked,
@@ -3663,6 +3670,7 @@ class TestConfigCache:
             "dashboard": {"default_memory_mode": "incognito"},
         }
         with (
+            patch.object(platform_compat, "IS_LINUX", False),
             patch("kiro_crew.config.loader.config_path", return_value=cfg_file),
             patch("kiro_crew.config.loader.config_local_path", return_value=local),
         ):

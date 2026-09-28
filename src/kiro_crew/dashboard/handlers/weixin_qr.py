@@ -35,7 +35,15 @@ from aiohttp import web
 
 from kiro_crew import platform_compat
 from kiro_crew.atomic_write import atomic_write
-from kiro_crew.config.loader import CRED_WEIXIN_TOKEN, KiroCrewConfig, config_path, env_path
+from kiro_crew.config.loader import (
+    CRED_WEIXIN_TOKEN,
+    KiroCrewConfig,
+    _config_write_lock,
+    _lock_target,
+    config_path,
+    env_path,
+    write_config_atomically,
+)
 from kiro_crew.dashboard.channel_folders import (
     channel_restart_required,
     clean_session_folder,
@@ -97,22 +105,33 @@ def _atomic_write(path: Path, text: str, *, secret: bool = False) -> None:
     path after the write would leave the credential readable under the
     directory-inherited DACL for the whole write. ``restrict_on_error="warn"``
     keeps this writer's contract: a host where the lockdown cannot be applied
-    must not abort a credential save that already succeeded. For a non-secret
-    file the EXISTING mode is carried over, because the replacement would
-    otherwise adopt the umask default and silently downgrade an
-    already-restricted file — ``config.json`` can hold inline fallback
-    credentials, so a 0600 → 0644 transition there would expose them to other
-    local users.
+    must not abort a credential save that already succeeded.
+
+    A non-secret write here is always the ``config.json`` document, and it goes
+    through :func:`write_config_atomically` like every other config writer: that
+    is the one publish that keeps the file's mode (``config.json`` can hold inline
+    fallback credentials, so a 0600 → 0644 transition would expose them) and, on
+    Linux, keeps its INODE -- the sandbox seals the file with a read-only bind
+    pinned to the inode, and a rename there would hand every running sandbox a
+    fresh, unsealed one. *text* is the serialized document, so it is parsed back
+    for the shared writer.
+
+    The config write holds the same ``<config>.lock`` sidecar
+    :meth:`KiroCrewConfig.save` and ``update_config_locked`` hold, so this
+    whole-document publish cannot land inside another process's
+    read-modify-write (a CLI ``config set``, a second gateway). The in-process
+    ``_get_config_lock()`` the caller holds serializes same-loop handlers only.
+    Lock order is ``.env.lock`` (taken by ``_commit_credential_and_config``)
+    then ``config.json.lock``; no holder in the tree takes them the other way
+    round -- every other ``.env.lock`` holder writes only ``.env`` inside it, and
+    ``messaging.py`` commits its config write and releases before it takes
+    ``.env.lock``.
     """
     if secret:
         atomic_write(path, text, restrict_to_owner=True, restrict_on_error="warn")
         return
-    preserved: Optional[int] = None
-    try:
-        preserved = path.stat().st_mode & 0o777
-    except OSError:
-        preserved = None  # new file: fall through to the repo-default umask mode
-    atomic_write(path, text, mode=preserved)
+    with _config_write_lock(_lock_target(path)):
+        write_config_atomically(path, json.loads(text))
 
 
 def _write_env_secret(key: str, value: str) -> None:

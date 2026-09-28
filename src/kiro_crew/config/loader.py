@@ -1282,8 +1282,11 @@ def read_config_for_update(path: Path | None = None) -> dict:
     must let that abort the update — leaving the existing file untouched is
     always better than overwriting it with defaults.
 
-    Pair this with :func:`kiro_crew.atomic_write.atomic_write` on the way out so
-    the write cannot create the torn window for the next reader.
+    Pair this with :func:`write_config_atomically` on the way out: an atomic
+    tmp+rename, except in place for the two sealed files on Linux (the sandbox's
+    read-only bind holds the inode). Only there does a torn window exist for a
+    reader outside the lock, and this function's fail-closed read is what keeps
+    such a reader from writing the emptiness back.
     """
     p = path if path is not None else config_path()
     try:
@@ -1369,20 +1372,213 @@ def _deepseek_env_on_disk(path: Path) -> object:
     return agent.get("deepseek_env") if isinstance(agent, dict) else None
 
 
+def _sealed_config_realpaths() -> frozenset[str]:
+    """The resolved paths of the two files the OS sandbox seals read-only.
+
+    ``config.json`` and ``config.local.json`` (``sandbox._CREW_READONLY_LEAVES``),
+    by ``os.path.realpath`` so a symlinked config and its target compare equal.
+    Shared by :func:`write_config_atomically`, which decides the in-place publish
+    from it, and by ``cli_config._names_sealed_config``, which decides whether a
+    refused write was the seal -- one set, so the two cannot disagree.
+    """
+    return frozenset(os.path.realpath(p) for p in (config_path(), config_local_path()))
+
+
+def _read_config_text(path: Path) -> str:
+    """Return *path*'s text, re-reading once if the first read does not parse as JSON.
+
+    The in-place publish (:func:`_write_config_in_place`) rewrites the two sealed
+    files through their existing inode, so a reader that races the write can
+    catch it mid-publish. The publish is brace-last (:func:`_install_brace_last`):
+    the file has no opening ``{`` until the last byte lands, so every mid-publish
+    snapshot FAILS to parse -- a reader never gets a hybrid of the two documents,
+    only the old one, the new one, or a ``JSONDecodeError``. A rename never had
+    that window. Marking the file degraded on that first torn read would deny
+    publishing and fail the ceiling gates closed for the rest of the gateway's
+    life over a legitimate settings save, so a text that does not parse is read
+    once more. The second text is returned as-is: the caller parses it, and a
+    document that fails BOTH reads is corrupt and the caller's to record.
+    Returning text rather than the parsed object lets the caller digest exactly
+    the bytes it parsed.
+
+    The re-read is immediate. ``KiroCrewConfig.load()`` runs on the event loop
+    (``no-blocking-call-on-event-loop``), so no sleep is allowed here; the torn
+    window is four syscalls of the writer's, no disk wait among them, and a
+    second ``read_text`` lands after it in practice. ``OSError`` is not
+    retried -- an unreadable file is not a race.
+    """
+    text = path.read_text(encoding="utf-8")
+    try:
+        json.loads(text)
+    except json.JSONDecodeError:
+        text = path.read_text(encoding="utf-8")
+    return text
+
+
+def _publishes_in_place(path: Path) -> bool:
+    """Whether *path* is written in place rather than by temp+rename.
+
+    True only on Linux and only for the two sealed files: a Linux file bind mount
+    is pinned to the inode it was made over, so those are the only writes where
+    a rename would hand every running sandbox a fresh, unsealed inode. Seatbelt
+    on macOS seals by PATH, and Windows has no bind mounts, so every other write
+    keeps the atomic rename and its zero torn-read window.
+    """
+    if not platform_compat.IS_LINUX:
+        return False
+    return os.path.realpath(path) in _sealed_config_realpaths()
+
+
+def _install_brace_last(fd: int, doc: bytes) -> None:
+    """Install *doc* over the open file *fd* so that no intermediate state parses.
+
+    The ordering is the whole guarantee. Byte 0 becomes a space first, so from
+    this point until the last step the file has no opening ``{`` and
+    ``json.loads`` rejects every snapshot of it. The remaining bytes are written
+    from offset 1, the file is truncated to ``len(doc)`` (trimming any stale
+    tail of a longer previous document), and the opening byte is written back
+    LAST, in a single one-byte ``pwrite`` -- the document is complete the moment
+    that byte lands. A previous document that did not start with ``{`` (a
+    hand-edited leading newline) still cannot yield a hybrid: with byte 0 a
+    space, any snapshot either equals the old document semantically or starts
+    with a quoted key, which is not a JSON value.
+
+    Callers pass a JSON object serialization (``json.dumps`` of a dict, so byte 0
+    is ``{``) or the previous document's bytes on rollback. An empty *doc*
+    truncates the file to zero.
+    """
+    os.pwrite(fd, b" ", 0)
+    os.lseek(fd, 1, os.SEEK_SET)
+    written = 1
+    while written < len(doc):
+        written += os.write(fd, doc[written:])
+    os.ftruncate(fd, len(doc))
+    os.pwrite(fd, doc[:1], 0)
+
+
+def _write_config_in_place(path: Path, payload: str, *, mode: int) -> None:
+    """Write *payload* over *path* through the inode already at that name.
+
+    The Linux publish for the two sealed files (:func:`_publishes_in_place`).
+    Deliberately NOT a temp+rename: the OS sandbox seals ``config.json`` /
+    ``config.local.json`` with a read-only bind mount
+    (``sandbox._CREW_READONLY_LEAVES``), and a Linux file bind is pinned to the
+    INODE it was made over. A rename installs a new inode at the name, so every
+    sandbox already running would see that new file unsealed and writable -- the
+    seal would last exactly until the owner's next save. Writing in place keeps
+    the inode, so the bind holds and a sandboxed reader sees the live content,
+    read-only.
+
+    **No intermediate state parses.** A reader racing the write sees a prefix
+    of the new bytes and a tail of the old ones, and because both documents are
+    pretty-printed JSON objects such a hybrid can PARSE -- as a document neither
+    save authorized. So the publish is brace-last (:func:`_install_brace_last`):
+    byte 0 is first overwritten with a space, the rest of the payload is written
+    from byte 1, the file is truncated to the new length, and only then is the
+    opening ``{`` written back. Every snapshot in between starts with whitespace
+    followed by a quoted key, which ``json.loads`` rejects, so a racing reader
+    sees the old document, the new one, or a parse failure -- never a hybrid.
+    The loader re-reads a parse failure once (:func:`_read_config_text`) and
+    :func:`read_config_for_update` fails closed on it. If the write or truncate
+    itself fails (ENOSPC, EIO), the bytes read before the write are put back the
+    same brace-last way, so a failed save leaves the previous document rather
+    than a torn or hybrid one; the failure is then re-raised. The write is always
+    fsynced (whatever the caller's *fsync*): unlike a rename, an unflushed
+    in-place write can surface as an empty or torn file after power loss for
+    as long as the kernel holds it dirty, so the flush shrinks that window to
+    the write itself. A SIGKILL or power loss mid-write is the accepted
+    residual a rename would not have had.
+
+    The publish must also be VISIBLE to the fingerprint every other process
+    keys its cache on: a rename changes the inode, this does not, and on a
+    coarse-timestamp filesystem a same-size rewrite within one tick would leave
+    mtime unchanged too. So if the mtime did not strictly advance it is bumped
+    by one nanosecond over the prior value (through the fd, falling back to the
+    path where fd ``utime`` is unsupported).
+
+    An existing file keeps its mode by construction; an absent one is created
+    owner-only (*mode*). When that first write then fails, the rollback REMOVES
+    the file rather than restoring its (empty) prior bytes: the rename path left
+    no file behind on a failed first save, and a zero-byte file at this name is
+    not "no settings" but a document that fails to parse, which the loader marks
+    degraded for the life of the process. A symlink was already resolved by the
+    caller, so the open follows nothing further.
+    """
+    encoded = payload.encode("utf-8")
+    existed = os.path.lexists(path)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, mode)
+    try:
+        prior_st = os.fstat(fd)
+        old = b""
+        chunk = os.read(fd, 1 << 16)
+        while chunk:
+            old += chunk
+            chunk = os.read(fd, 1 << 16)
+        try:
+            _install_brace_last(fd, encoded)
+            os.fsync(fd)
+        except BaseException:
+            # Put the previous document back so the failure is not also a torn
+            # config. Best effort: the original error is what the caller sees.
+            try:
+                if not existed:
+                    # Nothing to put back: this call created the file, and an
+                    # empty one would parse as corrupt, not as absent.
+                    os.unlink(path)
+                else:
+                    _install_brace_last(fd, old)
+            except OSError:
+                logger.error(
+                    "config write to %s failed and the previous document could not "
+                    "be restored; the file may be torn",
+                    path,
+                    exc_info=True,
+                )
+            raise
+        after_st = os.fstat(fd)
+        if after_st.st_mtime_ns <= prior_st.st_mtime_ns:
+            # A same-size write inside the clock tick leaves dev/ino/size/mtime
+            # unchanged, so _config_fingerprint() would never bust. Try one
+            # nanosecond first; a filesystem with coarser timestamps truncates
+            # that back to the old value, so re-check and step a whole second.
+            for step_ns in (1, 1_000_000_000):
+                bumped = (after_st.st_atime_ns, prior_st.st_mtime_ns + step_ns)
+                try:
+                    os.utime(fd, ns=bumped)
+                except (OSError, TypeError, NotImplementedError):
+                    os.utime(path, ns=bumped)
+                if os.fstat(fd).st_mtime_ns > prior_st.st_mtime_ns:
+                    break
+    finally:
+        os.close(fd)
+
+
 def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> None:
-    """Write a config dict to *path* atomically, PRESERVING its permissions.
+    """Write a config dict to *path* in one publish, PRESERVING its permissions.
 
     The companion to :func:`read_config_for_update`. Two properties matter:
 
     * **Atomic** (tmp+rename) so a concurrent reader can never observe a
       half-written file. A truncate-then-write leaves a window in which a reader
       sees invalid JSON; a reader that mistakes that for "no settings" will write
-      the emptiness back and destroy the user's config.
+      the emptiness back and destroy the user's config. ONE exception, decided
+      by :func:`_publishes_in_place`: on Linux the two sealed files
+      ``config.json`` / ``config.local.json`` are written IN PLACE
+      (:func:`_write_config_in_place`), because the OS sandbox's read-only seal
+      on them is a bind mount pinned to the inode, and a rename would put a new,
+      unsealed inode at the name for every sandbox already running. The price
+      there is a small torn-read window, which the loader absorbs: a torn read is
+      treated as unreadable, nothing is written back, and every
+      read-modify-write goes through :func:`read_config_for_update`, which fails
+      CLOSED. Every other path -- macOS (Seatbelt seals by path), Windows (no
+      bind mounts), and any non-config document such as an agent spec -- keeps
+      the rename.
     * **Mode-preserving.** Because tmp+rename creates a NEW inode, the umask
       default (typically ``0644``) would silently replace an operator's tightened
       ``0600``. ``config.json`` can hold inline credentials, so a settings write
-      must never widen who can read it. An existing file's mode is carried over;
-      a newly created one defaults to owner-only.
+      must never widen who can read it. An existing file's mode is carried over
+      (the in-place write keeps it by construction); a newly created one defaults
+      to owner-only.
 
     ``atomic_write``'s ``mode`` routes through ``fchmod_safe``, which applies the
     mode on POSIX and is a documented no-op on Windows.
@@ -1416,7 +1612,8 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
     itself, turning a symlinked ``config.json`` into a regular file and orphaning
     its target — whereas the ``write_text`` this replaced followed the link and
     updated the target. Symlinking the config into a dotfiles repo is a normal
-    setup, so the target is resolved first to preserve that behavior.
+    setup, so the target is resolved first, and the mode preserved is the
+    target's.
     """
     _refuse_unpublishable(data, path)
     # Resolve BEFORE stat/write so a symlinked config keeps pointing at its
@@ -1476,7 +1673,12 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
         mode = 0o600
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, indent=2) + "\n"
-    if platform_compat.IS_POSIX:
+    if _publishes_in_place(path):
+        # Linux, one of the two sealed files: in place, not temp+rename. The
+        # sandbox's read-only bind holds the INODE, and a rename would hand every
+        # running sandbox a fresh, unsealed one. See _write_config_in_place.
+        _write_config_in_place(path, payload, mode=mode)
+    elif platform_compat.IS_POSIX:
         atomic_write(path, payload, fsync=fsync, mode=mode)
     elif lock_down:
         # Windows: the mode bits above are inert (fchmod_safe is a documented
@@ -1629,10 +1831,11 @@ def update_config_locked(
       land between the other's read and write.
     * **Sidecar lockfile.** The lock lives on ``<path>.lock``, NOT on the
       config file's own fd.  ``write_config_atomically`` replaces the inode
-      (tmp + rename), so a lock taken on the config file's fd would not
-      serialize against the rename — a second opener after the rename gets a
-      NEW fd on the NEW inode and takes the lock instantly, defeating the
-      purpose.
+      (atomic tmp + rename, except in place for the two sealed files on Linux),
+      so a lock taken on the config file's fd would not serialize against the
+      rename — a second opener after the rename gets a NEW fd on the NEW inode
+      and takes the lock instantly, defeating the purpose. The sidecar stays
+      the one lock path on every platform, in-place publish included.
     * **Fail-closed read (default).** :func:`read_config_for_update` is used
       inside the critical section; with ``on_corrupt="fail"`` (the default), an
       unreadable or malformed config raises :class:`ConfigReadError`, aborts
@@ -2118,10 +2321,14 @@ def _config_fingerprint() -> tuple:
     """Cheap signature of the config files — changes whenever either is edited.
 
     Includes replacement identity (device + inode) and change time in addition
-    to mtime, size, and mode. Dashboard/CLI writers publish with atomic rename;
-    on a coarse-timestamp filesystem an Incognito→Temporary replacement can
-    otherwise keep the same mtime and size, making another process's cache look
-    current. A missing file contributes a sentinel so create/delete also busts.
+    to mtime, size, and mode. An Incognito→Temporary write keeps the same size,
+    and on a coarse-timestamp filesystem the same mtime, so those alone would
+    make another process's cache look current. Device + inode catch the atomic
+    tmp+rename ``write_config_atomically`` publishes with (and any out-of-band
+    editor); ctime and the strictly advanced mtime catch its one exception, the
+    in-place publish for the two sealed files on Linux, where the inode is
+    deliberately kept so the sandbox's read-only bind on it survives the save.
+    A missing file contributes a sentinel so create/delete also busts.
     """
     sig: list = []
     for p in (config_path(), config_local_path()):
@@ -3604,7 +3811,7 @@ class KiroCrewConfig:
             digestible = True
             if path.exists():
                 try:
-                    base_text = path.read_text(encoding="utf-8")
+                    base_text = _read_config_text(path)
                     read_parts[0] = base_text.encode("utf-8")
                     raw = json.loads(base_text)
                     if isinstance(raw, dict):
@@ -3658,7 +3865,7 @@ class KiroCrewConfig:
                             st_mode & 0o777,
                             local_path,
                         )
-                    local_text = local_path.read_text(encoding="utf-8")
+                    local_text = _read_config_text(local_path)
                     read_parts[1] = local_text.encode("utf-8")
                     raw_local = json.loads(local_text)
                     if isinstance(raw_local, dict):
@@ -4575,11 +4782,13 @@ class KiroCrewConfig:
 
         # Atomic + mode-preserving: a concurrent reader must never observe a
         # half-written config, and the write must not widen who can read a file
-        # that may hold inline credentials. See write_config_atomically.
+        # that may hold inline credentials. On Linux the two sealed files are
+        # written in place instead, so the sandbox's read-only bind (pinned to
+        # the inode) survives the save. See write_config_atomically.
         #
         # Resolve a symlinked config BEFORE locking (same logic as
         # update_config_locked) so the sidecar sits beside the ACTUAL file the
-        # rename will replace — a lock beside the symlink would not serialize
+        # write will land on — a lock beside the symlink would not serialize
         # against a writer that resolved first.
         p = config_path()
         try:
