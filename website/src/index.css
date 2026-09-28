@@ -1608,7 +1608,13 @@ button:hover .app-icon{--ico-a:var(--accent);--ico-b:var(--text)}
    which is why no dark-theme override is needed. */
 @property --glow-strength{syntax:'<number>';inherits:false;initial-value:0}
 @keyframes approval-glow{0%,100%{--glow-strength:0}50%{--glow-strength:1}}
-.approval-glow{--glow-strength:0;animation:approval-glow 2.5s ease-in-out infinite;box-shadow:0 0 0 1.5px color-mix(in srgb, var(--warn) calc(var(--glow-strength) * 55%), transparent),0 0 14px 1px color-mix(in srgb, var(--warn) calc(var(--glow-strength) * 40%), transparent)}
+.approval-glow{--glow-strength:0;--approval-shadow:0 0 0 1.5px color-mix(in srgb, var(--warn) calc(var(--glow-strength) * 55%), transparent),0 0 14px 1px color-mix(in srgb, var(--warn) calc(var(--glow-strength) * 40%), transparent);animation:approval-glow 2.5s ease-in-out infinite;box-shadow:var(--approval-shadow)}
+/* Reduced motion: the global rule above cuts every animation to one 0.01ms
+   run, which parks the pulse at its 0% keyframe and leaves --approval-shadow
+   fully transparent — a pending approval then showed NO glow, and the glass
+   dock that hands its shadow slot to this variable showed no shadow either.
+   A steady mid-pulse ring says "waiting" without moving. */
+@media (prefers-reduced-motion:reduce){.approval-glow{animation:none;--glow-strength:.6}}
 @keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
 .animate-shimmer{animation:shimmer 2s ease-in-out infinite}
 @keyframes hourglass-flip{
@@ -2924,9 +2930,19 @@ body.mc-focus-mode.mc-focus-rail .focus-chrome-rail{
  * ink at roughly twice the alpha, so the two side lines read as the focus ring
  * the material otherwise has none of),
  * so the pane visibly lights up (neutral, never the theme color) when a control
- * inside it takes focus — the shadow deepening alone measured as no delta. */
-:root { --glass-tint: rgba(30, 30, 34, 0.40); --glass-tint-focus: rgba(84, 84, 92, 0.72); --glass-band: rgba(255, 255, 255, 0.22); --glass-edge: rgba(255, 255, 255, 0.14); --glass-edge-focus: rgba(255, 255, 255, 0.55); --glass-hairline: rgba(0, 0, 0, 0.50); }
-[data-mode="light"] { --glass-tint: rgba(238, 238, 243, 0.45); --glass-tint-focus: rgba(255, 255, 255, 0.92); --glass-band: rgba(255, 255, 255, 0.92); --glass-edge: rgba(0, 0, 0, 0.24); --glass-edge-focus: rgba(0, 0, 0, 0.60); --glass-hairline: rgba(0, 0, 0, 0.20); }
+ * inside it takes focus — the shadow deepening alone measured as no delta.
+ * The dark tint is NOT a darkening: the reference material over pure black
+ * settles at rgb(54, 57, 62), a slightly blue dark grey, and a black tint can
+ * only ever land below the page. rgba(222, 234, 255, 0.24) is that color solved
+ * back into a translucent fill (black under it measures 56 / 58 / 62); the side
+ * line is 35% white for the same reason — the reference's rim reads about +100
+ * over the page, and 14% measured +20.
+ * --glass-text / --glass-placeholder are what a text input INSIDE the pane
+ * types in: pure white on smoked glass with a mid grey (#9c9c9c) placeholder,
+ * as in the reference; on a light pane they fall back to the theme's text and
+ * muted inks, where white would vanish. */
+:root { --glass-tint: rgba(222, 234, 255, 0.24); --glass-tint-focus: rgba(222, 234, 255, 0.40); --glass-band: rgba(255, 255, 255, 0.22); --glass-edge: rgba(255, 255, 255, 0.35); --glass-edge-focus: rgba(255, 255, 255, 0.70); --glass-hairline: rgba(0, 0, 0, 0.50); --glass-text: #ffffff; --glass-placeholder: #9c9c9c; }
+[data-mode="light"] { --glass-tint: rgba(238, 238, 243, 0.45); --glass-tint-focus: rgba(255, 255, 255, 0.92); --glass-band: rgba(255, 255, 255, 0.92); --glass-edge: rgba(0, 0, 0, 0.24); --glass-edge-focus: rgba(0, 0, 0, 0.60); --glass-hairline: rgba(0, 0, 0, 0.20); --glass-text: var(--text); --glass-placeholder: var(--muted); }
 
 /* Tint steps for a Liquid Glass pane (components/Glass.tsx). Every surface in
  * the composer dock — the composer, the follow-up chips, the tip / suggestion /
@@ -2945,17 +2961,41 @@ body.mc-focus-mode.mc-focus-rail .focus-chrome-rail{
 .glass-warn { --glass-tint: var(--glass-tint-warn); }
 .glass-hover:hover { --glass-tint: var(--glass-tint-hover); }
 
-/* Neutral rest shadow for a glass pane that is NOT the session composer: the
- * mobile Settings capsule, the tip / suggestion / question cards. Same offset-
- * free spread as `.composer-halo` below, minus the accent focus glow — the
- * theme-colored highlight belongs to the composer alone, never to the material.
+/* The context shelf (agent, project, branch, model chips) sits BELOW the glass
+ * pane, on the bare transcript, and the dock floats over content, so a chip
+ * label was reading against whatever scrolled under it. The shelf stands on a
+ * short scrim: nothing at the pane's bottom edge, the page colour (`--bg`)
+ * solid by 60% of the shelf's height, so the chips sit on plain page and the
+ * glass above them stays glass. It is a `::before` in the shelf's own stacking
+ * context (above the transcript, below the chips), spanning the whole pane
+ * width — the chat pane clips it — so the fade has no visible side edge. */
+/* Secondary ink inside a dark pane. The retuned dark tint composites to about
+ * rgb(67, 71, 81) over the default page, where the theme's `--muted` (#7f7f88)
+ * keeps barely 2:1 -- half of what it had on the old near-black fill. Every
+ * `text-muted` inside a Liquid Glass pane (chip labels, the memory chip, the
+ * card hints, the composer's own control row) therefore reads a brighter muted
+ * ink on smoked glass; a light pane keeps the theme's. Polarity-fixed, like
+ * the tint it answers. The composer's placeholder has its own token. */
+:root { --glass-muted: #b4b4bc; }
+[data-mode="light"] { --glass-muted: var(--muted); }
+.liquid-glass { --muted: var(--glass-muted); }
+
+.glass-shelf { position: relative; isolation: isolate; }
+.glass-shelf::before { content: ''; position: absolute; top: 0; bottom: -4px; left: -100vw; right: -100vw; background: linear-gradient(to bottom, transparent, var(--bg) 60%); z-index: -1; pointer-events: none; }
+
+/* Neutral rest shadow for every glass pane: the session composer dock, the
+ * mobile Settings capsule, the tip / suggestion / question cards. An offset-
+ * free spread on all four sides, so the box reads as set INTO the page rather
+ * than dropped onto it. Neutral black on purpose: a themed shadow would shift
+ * hue on colorful backgrounds instead of reading as depth, and dark themes take
+ * a stronger alpha because the surrounding page is already near black.
  * Focus-within deepens the shadow one step AND, on a neutral pane, swaps the
  * tint for `--glass-tint-focus` (a brighter, more opaque step of the same hue)
  * and the side line for `--glass-edge-focus` (the same ink, about twice the
  * alpha): the shadow step alone read as zero delta on the capsule screenshots,
  * and the tint step alone measured +23 in the dark theme yet still went unseen
- * beside the unchanged edges, so the edges now step with it. Neutral on
- * purpose — no theme color: the accent glow is the session composer's alone.
+ * beside the unchanged edges, so the edges now step with it. No theme color
+ * anywhere: focus is the material getting a step clearer, not a colored ring.
  * Where the material is solidified (the three fallback blocks at the end of
  * this file) none of these layers paint, so those blocks give a focused
  * `.glass-shadow` pane the app's standard accent outline instead. */
@@ -2966,6 +3006,9 @@ body.mc-focus-mode.mc-focus-rail .focus-chrome-rail{
    focus step must not wash it out while a control inside it has focus. */
 .glass-shadow:focus-within:not(.glass-accent, .glass-warn) { --glass-tint: var(--glass-tint-focus); --glass-edge: var(--glass-edge-focus); }
 [data-mode="dark"] .glass-shadow:focus-within { box-shadow: 0 0 18px rgba(0, 0, 0, 0.55); }
+/* A pending approval swaps the pane's rest / focus shadow for the warm glow,
+   at rest and while focused; the tint + edge focus step above still applies. */
+.glass-shadow.approval-glow, .glass-shadow.approval-glow:focus-within { box-shadow: var(--approval-shadow); }
 
 /* The composer dock's two wrapper boxes (ChatPage.tsx) span the pane but hold
    nothing of their own: every child is its own content column. The wrappers
@@ -2979,53 +3022,6 @@ body.mc-focus-mode.mc-focus-rail .focus-chrome-rail{
    as a whole for exactly that stretch. */
 .dock-inert{pointer-events:none}.dock-inert>*{pointer-events:auto}
 .dock-inert[data-overflowing="true"]{pointer-events:auto}
-
-/* Composer halo (ChatInput.tsx): an offset-free shadow spreading evenly on all
- * four sides, so the box reads as set INTO the page rather than dropped onto it.
- * At rest it is neutral and faint; while the composer holds focus it takes the
- * theme's --accent-glow (the accent at each theme's own glow alpha, stronger in
- * dark themes and tunable by an installed pack), lighting up together with the
- * wrapper's focus-within accent border as one signal. The rest shadow is
- * neutral black on purpose: a themed shadow color would shift hue on colorful
- * backgrounds instead of reading as depth, and dark themes take a stronger
- * alpha because the surrounding background is already near black. */
-.composer-halo {
-  box-shadow: 0 0 18px rgba(0, 0, 0, 0.06);
-  transition: box-shadow 0.18s ease;
-}
-/* Polarity is read from data-mode, the attribute useTheme sets to what it
- * paints, so a custom pack gets the right alpha whatever its slug is called.
- * This rule sits BEFORE the focus rule: both have equal specificity, so source
- * order is what lets focus win over the dark rest shadow. */
-[data-mode="dark"] .composer-halo {
-  box-shadow: 0 0 18px rgba(0, 0, 0, 0.30);
-}
-.composer-halo:focus-within {
-  box-shadow: 0 0 18px var(--accent-glow);
-}
-/* Dark themes add a 1px accent ring under the glow: on smoked glass the glow
-   alone did not separate a focused capsule from a resting one (a reader could
-   not tell the two apart), while on a light page the hairline turning accent
-   already reads. Same specificity as the dark rest rule, later in source, so
-   focus still wins; the memory-mode forms below come later again. */
-[data-mode="dark"] .composer-halo:focus-within {
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent), 0 0 18px var(--accent-glow);
-}
-/* Memory-mode variants follow the wrapper's always-on border color (warn for
- * incognito, aim for temporary) so focus reads as one color per control. No
- * per-theme glow token exists for these two colors, so the alpha is fixed. */
-.composer-halo-warn:focus-within {
-  box-shadow: 0 0 18px color-mix(in srgb, var(--warn) 18%, transparent);
-}
-.composer-halo-aim:focus-within {
-  box-shadow: 0 0 18px color-mix(in srgb, var(--aim) 18%, transparent);
-}
-[data-mode="dark"] .composer-halo-warn:focus-within {
-  box-shadow: 0 0 18px color-mix(in srgb, var(--warn) 22%, transparent);
-}
-[data-mode="dark"] .composer-halo-aim:focus-within {
-  box-shadow: 0 0 18px color-mix(in srgb, var(--aim) 22%, transparent);
-}
 
 /* File-diff chips (FileChangeChips.tsx): flatter edge — no top highlight or
  * refraction, just a hairline border. Composes with .glass-surface (keeps the
@@ -3077,6 +3073,9 @@ body.mc-focus-mode.mc-focus-rail .focus-chrome-rail{
      their hue on the solid surface. */
   .liquid-glass.glass-accent{ background:color-mix(in srgb, var(--accent) 14%, var(--bg-elevated)) !important }
   .liquid-glass.glass-warn{ background:color-mix(in srgb, var(--warn) 12%, var(--bg-elevated)) !important }
+  /* `.glass-hover` steps a tint the hidden frost layer would have painted, so
+     the hover feedback moves onto the solid fill too. */
+  .liquid-glass.glass-hover:hover{ background:color-mix(in srgb, var(--text) 8%, var(--bg-elevated)) !important }
   .liquid-glass>[data-liquid-glass-layer]{ display:none !important }
   /* The focus cue of a neutral pane (tint + side-line step) lives in the hidden
      layers, so a solidified pane holding focus gets the standard ring. */
@@ -3124,6 +3123,7 @@ body.mc-focus-mode.mc-focus-rail .focus-chrome-rail{
   .liquid-glass{ background:var(--bg-elevated) !important }
   .liquid-glass.glass-accent{ background:color-mix(in srgb, var(--accent) 14%, var(--bg-elevated)) !important }
   .liquid-glass.glass-warn{ background:color-mix(in srgb, var(--warn) 12%, var(--bg-elevated)) !important }
+  .liquid-glass.glass-hover:hover{ background:color-mix(in srgb, var(--text) 8%, var(--bg-elevated)) !important }
   .liquid-glass>[data-liquid-glass-layer]{ display:none !important }
   .glass-shadow:focus-within{ outline:2px solid var(--accent) !important; outline-offset:2px }
 }
@@ -3136,6 +3136,8 @@ body.mc-focus-mode.mc-focus-rail .focus-chrome-rail{
   .liquid-glass{ outline:1px solid var(--text) !important; outline-offset:-1px }
   .liquid-glass.glass-accent{ outline-color:var(--accent) !important }
   .liquid-glass.glass-warn{ outline-color:var(--warn) !important }
+  /* Twice the other blocks' 8%: the users who asked for more contrast get the clearest hover, not the faintest. */
+  .liquid-glass.glass-hover:hover{ background:color-mix(in srgb, var(--text) 16%, var(--bg-elevated)) !important }
   /* The pane outline above is !important, so it would beat the base-layer
      :focus-visible ring on the chips / memory chip / jump button, which are
      glass buttons; keyboard focus re-asserts the ring inside the same block. */

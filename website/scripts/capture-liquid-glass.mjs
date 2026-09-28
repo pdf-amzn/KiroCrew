@@ -5,10 +5,12 @@
  * the transcript scrolling under it) and the mobile Settings bottom search
  * capsule. Photographs the REAL built SPA (website/dist) over a stubbed
  * dashboard API in both polarities, so the frosted --glass-tint, the top/bottom
- * specular band and the composer halo are the shipped ones, not a mock. The
- * long-transcript scene also asserts the floating-dock geometry, and the
- * `spawn-flow` scene records the approval band's three-step transition as a
- * GIF (needs ffmpeg on PATH). Nothing in CI runs this file.
+ * specular band and the neutral glass-shadow are the shipped ones, not a mock. The
+ * long-transcript scene also asserts the floating-dock geometry, the `contrast`
+ * scene photographs the solidifying fallback (prefers-contrast: more emulated:
+ * hovered chip, focused composer), and the `spawn-flow` scene records the
+ * approval band's three-step transition as a GIF (needs ffmpeg on PATH).
+ * Nothing in CI runs this file.
  *
  * Usage: node scripts/capture-liquid-glass.mjs [outDir]
  */
@@ -155,7 +157,7 @@ async function main() {
     activeDetail = variant === 'long' || variant === 'question' || variant === 'folder' ? longDetail
       : variant === 'approval' || variant === 'spawn-both' ? approvalDetail
       : variant === 'spawn' || variant === 'tip' ? runningDetail
-      : variant === 'chips' || variant === 'chips-picked' ? chipsDetail
+      : variant === 'chips' || variant === 'chips-picked' || variant === 'contrast' ? chipsDetail
       : variant === 'welcome' || variant === 'incognito' ? welcomeDetail
       : detail
     const context = await browser.newContext({ viewport: { width: 1500, height: 950 }, deviceScaleFactor: 2 })
@@ -175,6 +177,11 @@ async function main() {
     // The collapsed composer is a persisted per-browser choice (ChatInput's
     // COMPOSER_COLLAPSED_LS_KEY); seed it so the dock comes up as the bar.
     if (variant === 'collapsed') await page.addInitScript(() => { localStorage.setItem('mc-composer-collapsed', '1') })
+    // The solidifying fallback: the frost layers are hidden, every pane is a
+    // flat bg-elevated card, hover is a 16% text mix and the composer's focus
+    // cue is the app's standard accent outline. Emulated, not styled: the
+    // `prefers-contrast: more` block in index.css is what paints this frame.
+    if (variant === 'contrast') await page.emulateMedia({ contrast: 'more' })
     await page.goto(base + '/', { waitUntil: 'domcontentloaded' })
     // The tip gate is 10s; a multi-frame scene needs its last frame landed and painted.
     await page.waitForTimeout(variant === 'tip' ? 12500 : 2500 + Math.max(0, frames.length - 1) * 900 + 500)
@@ -224,6 +231,32 @@ async function main() {
         await page.waitForTimeout(250)
         console.log(`chat/${theme}/long: dock stops ${gutter.reserved}px short of the scrollbar column; wheel in the ${Math.round(gutter.colLeft - gutter.dockLeft)}px gutter scrolled the transcript ${Math.round(gutter.before - after)}px`)
       }
+      // Scroll up far enough that a message body runs under the WHOLE dock,
+      // the context shelf included: the shelf sits below the glass on the
+      // bare transcript and stands on the `glass-shelf` fade (nothing at the
+      // pane's bottom edge, page colour by 60% of its height), so a chip label
+      // never reads against text scrolling under it. Assert the fade is there
+      // and the glass above it is not touched by it, then photograph the
+      // dock's bottom edge.
+      const shelfGeo = await page.evaluate(() => {
+        const el = document.querySelector('.chat-container'); el.scrollTop = el.scrollHeight - el.clientHeight - 420
+        const shelf = document.querySelector('[data-testid="composer-context-shelf"]')
+        const dock = document.querySelector('[data-testid="composer-dock"]')
+        if (!shelf || !dock) return null
+        const before = getComputedStyle(shelf, '::before')
+        const s = shelf.getBoundingClientRect(), d = dock.getBoundingClientRect()
+        return { bg: before.backgroundImage, z: before.zIndex, top: s.top, dockBottom: d.bottom, dockLeft: d.left, dockWidth: d.width, shelfBottom: s.bottom, dockBg: getComputedStyle(dock, '::before').backgroundImage }
+      })
+      if (!shelfGeo) throw new Error(`chat/${theme}/long: shelf or dock missing`)
+      if (!/linear-gradient\(/.test(shelfGeo.bg) || shelfGeo.z !== '-1') throw new Error(`chat/${theme}/long: shelf has no fade behind it (${shelfGeo.bg} z=${shelfGeo.z})`)
+      if (shelfGeo.top - shelfGeo.dockBottom > 1) throw new Error(`chat/${theme}/long: the fade starts ${shelfGeo.top - shelfGeo.dockBottom}px below the pane, not at its edge`)
+      if (/linear-gradient\(/.test(shelfGeo.dockBg)) throw new Error(`chat/${theme}/long: the pane itself carries a fade (${shelfGeo.dockBg})`)
+      await page.waitForTimeout(600)
+      await page.screenshot({
+        path: `${OUT}/composer-${theme}-long-shelf-crop.png`,
+        clip: { x: Math.max(0, shelfGeo.dockLeft - 40), y: Math.max(0, shelfGeo.dockBottom - 120), width: shelfGeo.dockWidth + 80, height: (shelfGeo.shelfBottom - shelfGeo.dockBottom) + 150 },
+      })
+      console.log('wrote', `${OUT}/composer-${theme}-long-shelf-crop.png`)
       // Now scroll up so a message body, not the tail padding, sits under the glass.
       await page.evaluate(() => { const el = document.querySelector('.chat-container'); if (el) el.scrollTop = el.scrollHeight - el.clientHeight - 180 })
       await page.waitForTimeout(600)
@@ -301,6 +334,32 @@ async function main() {
       if (!(await page.getByRole('button', { name: /scroll to bottom/i }).count())) throw new Error(`chat/${theme}/long: jump-to-bottom pill missing while scrolled up`)
       console.log(`chat/${theme}/long: ${under} text node(s) sit under the glass`)
     }
+    if (variant === 'contrast') {
+      const chip = page.getByRole('button', { name: OPTIONS[0], exact: true })
+      if (!(await chip.count())) throw new Error(`chat/${theme}/contrast: chip "${OPTIONS[0]}" missing`)
+      const pane = chip.locator('xpath=ancestor-or-self::*[contains(concat(" ", normalize-space(@class), " "), " liquid-glass ")][1]')
+      const read = () => pane.evaluate(el => ({ bg: getComputedStyle(el).backgroundColor, layers: Array.from(el.querySelectorAll('[data-liquid-glass-layer]')).map(n => getComputedStyle(n).display) }))
+      const rest = await read()
+      if (rest.layers.some(d => d !== 'none')) throw new Error(`chat/${theme}/contrast: frost layers still painted under prefers-contrast (${rest.layers.join(',')})`)
+      await chip.hover()
+      await page.waitForTimeout(250)
+      const hover = await read()
+      if (hover.bg === rest.bg) throw new Error(`chat/${theme}/contrast: hovered chip background unchanged (${rest.bg}) -- the .glass-hover:hover fallback step did not paint`)
+      console.log(`chat/${theme}/contrast: hovered chip ${rest.bg} -> ${hover.bg}`)
+      await page.screenshot({
+        path: `${OUT}/composer-${theme}-contrast-hover-crop.png`,
+        clip: { x: Math.max(0, box.x - 40), y: Math.max(0, box.y - 140), width: box.width + 80, height: box.height + 180 },
+      })
+      await page.getByLabel('Message input').first().click()
+      await page.waitForTimeout(300)
+      const outline = await page.getByTestId('composer-dock').first().evaluate(el => { const c = getComputedStyle(el); return { style: c.outlineStyle, width: c.outlineWidth, color: c.outlineColor } })
+      if (outline.style !== 'solid' || outline.width !== '2px') throw new Error(`chat/${theme}/contrast: focused dock outline is ${outline.style} ${outline.width}, not the fallback's 2px solid accent`)
+      console.log(`chat/${theme}/contrast: focused dock outline ${outline.width} ${outline.style} ${outline.color}`)
+      await page.screenshot({
+        path: `${OUT}/composer-${theme}-contrast-focused-crop.png`,
+        clip: { x: Math.max(0, box.x - 40), y: Math.max(0, box.y - 140), width: box.width + 80, height: box.height + 180 },
+      })
+    }
     if (!variant) {
       // Rest state first: the composer autofocuses, and a focused frame hides
       // whether the pane has an outline of its own.
@@ -310,8 +369,44 @@ async function main() {
         path: `${OUT}/composer-${theme}-rest-crop.png`,
         clip: { x: Math.max(0, box.x - 40), y: Math.max(0, box.y - 140), width: box.width + 80, height: box.height + 180 },
       })
+      const dockEl = page.getByTestId('composer-dock').first()
+      const wrapEl = page.getByTestId('input-wrapper').first()
+      const restDock = await dockEl.evaluate(el => ({ shadow: getComputedStyle(el).boxShadow, tint: getComputedStyle(el).getPropertyValue('--glass-tint').trim() }))
+      const restBorder = await wrapEl.evaluate(el => getComputedStyle(el).borderTopColor)
       await page.getByLabel('Message input').first().click()
       await page.waitForTimeout(300)
+      // Focus is the glass itself getting a step clearer: the neutral shadow
+      // deepens and the tint steps, and NOTHING turns the theme colour -- no
+      // accent glow on the dock, no accent border on the wrapper.
+      const focusDock = await dockEl.evaluate(el => ({ shadow: getComputedStyle(el).boxShadow, tint: getComputedStyle(el).getPropertyValue('--glass-tint').trim() }))
+      const focusBorder = await wrapEl.evaluate(el => getComputedStyle(el).borderTopColor)
+      if (focusDock.shadow === restDock.shadow) throw new Error(`chat/${theme}: dock shadow unchanged on focus (${focusDock.shadow})`)
+      if (!/^rgba\(0, 0, 0, [\d.]+\) 0px 0px 18px 0px$/.test(focusDock.shadow)) throw new Error(`chat/${theme}: focused dock shadow is not the neutral glass-shadow: ${focusDock.shadow}`)
+      if (focusDock.tint === restDock.tint) throw new Error(`chat/${theme}: dock tint unchanged on focus (${focusDock.tint})`)
+      if (focusBorder !== restBorder) throw new Error(`chat/${theme}: wrapper border changed on focus (${restBorder} -> ${focusBorder}); the accent focus border is back -- the composer's focus cue must be the glass, not a themed border`)
+      console.log(`chat/${theme}: focus shadow ${restDock.shadow} -> ${focusDock.shadow}; tint ${restDock.tint} -> ${focusDock.tint}; border ${focusBorder} (unchanged)`)
+    }
+    if (variant === 'approval') {
+      // A pending decision keeps the warm glow in the shadow slot, and the
+      // textarea must still get a focus cue: the tint + edge step rides
+      // under the glow (WCAG 2.4.7 -- no state without a visible cue).
+      await page.mouse.click(700, 200)
+      await page.waitForTimeout(300)
+      const dockEl = page.getByTestId('composer-dock').first()
+      const read = () => dockEl.evaluate(el => ({ shadow: getComputedStyle(el).boxShadow, tint: getComputedStyle(el).getPropertyValue('--glass-tint').trim(), edge: getComputedStyle(el).getPropertyValue('--glass-edge').trim() }))
+      const rest = await read()
+      await page.getByLabel('Message input').first().click()
+      await page.waitForTimeout(300)
+      const focus = await read()
+      if (/rgba\(0, 0, 0, [\d.]+\) 0px 0px 18px 0px/.test(rest.shadow)) throw new Error(`chat/${theme}/approval: the neutral glass-shadow displaced the approval glow at rest (${rest.shadow})`)
+      if (/rgba\(0, 0, 0, [\d.]+\) 0px 0px 18px 0px/.test(focus.shadow)) throw new Error(`chat/${theme}/approval: the neutral glass-shadow displaced the approval glow on focus (${focus.shadow})`)
+      if (focus.tint === rest.tint) throw new Error(`chat/${theme}/approval: dock tint unchanged on focus while a decision is pending (${focus.tint})`)
+      if (focus.edge === rest.edge) throw new Error(`chat/${theme}/approval: dock edge unchanged on focus while a decision is pending (${focus.edge})`)
+      console.log(`chat/${theme}/approval: focus tint ${rest.tint} -> ${focus.tint}; edge ${rest.edge} -> ${focus.edge}; shadow stays the glow`)
+      await page.screenshot({
+        path: `${OUT}/composer-${theme}-approval-focused-crop.png`,
+        clip: { x: Math.max(0, box.x - 40), y: Math.max(0, box.y - 140), width: box.width + 80, height: box.height + 180 },
+      })
     }
     await page.screenshot({ path: `${OUT}/composer-${theme}${variant ? '-' + variant : ''}.png` })
     await page.screenshot({
@@ -453,6 +548,7 @@ async function main() {
     await chat(theme, 'spawn-both')
     await chat(theme, 'tip')
     await chat(theme, 'collapsed')
+    await chat(theme, 'contrast')
     await settingsMobile(theme)
     await settingsDesktop(theme)
     await spawnFlow(theme)

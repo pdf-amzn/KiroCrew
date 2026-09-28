@@ -178,7 +178,7 @@ describe('LiquidGlass', () => {
     // top and bottom edges. Then the two OUTER half-pixel hairlines just past
     // the top and bottom edges. Then the bevel, lit from straight above (no
     // horizontal offset in either inset).
-    expect(layers[2].style.boxShadow).toMatch(/^inset 1px 0(px)? 0(px)? var\(--glass-edge\), inset -1px 0(px)? 0(px)? var\(--glass-edge\), 0(px)? -0\.5px 0(px)? 0(px)? var\(--glass-hairline\), 0(px)? 0\.5px 0(px)? 0(px)? var\(--glass-hairline\), inset 0px 3\.27px/)
+    expect(layers[2].style.boxShadow).toMatch(/^inset 1px 0(px)? 0(px)? var\(--glass-edge\), inset -1px 0(px)? 0(px)? var\(--glass-edge\), 0(px)? -0\.5px 0(px)? 0(px)? var\(--glass-hairline\), 0(px)? 0\.5px 0(px)? 0(px)? var\(--glass-hairline\), inset 0px 8\.16px/)
     // The map fed the canvas: a 512-capped raster of the host's aspect.
     expect(fakeContext.putImageData).toHaveBeenCalledTimes(1)
     const raster = fakeContext.putImageData.mock.calls[0][0] as { width: number; height: number; data: Uint8ClampedArray }

@@ -13,25 +13,28 @@
  * they are (`variant`), how round they are (`radius`) and which element they
  * ARE (`as`); they never restate the optics.
  *
- * Two variants, one recipe: `panel` (frost 6, light 25) for the composer-sized
- * boxes and `chip` (frost 4, light 18) for the small pills and cards, where
- * the panel numbers read heavy at 30px tall.
+ * Two variants, one recipe: `panel` (frost 3, light 25) for the composer-sized
+ * boxes and `chip` (frost 2, light 18) for the small pills and cards, where
+ * the panel numbers read heavy at 30px tall. The blur is deliberately low: the
+ * reference material keeps the text under it legible in outline, and measured
+ * against it a 6px blur smeared a white bar's edge over 14px where the
+ * reference smears it over about 5.
  *
  * The pane IS the host element — there is no wrapper box. A follow-up chip is
  * `<Glass as="button" …>`: the button is the flex item, carries the width cap,
  * the entrance animation and its own `onClick`, and the effect layers sit
  * inside it under the label. `className` and `style` go on that host and carry
  * LAYOUT (margin, width, flex, padding) plus the box-shadow state the caller
- * owns — `glass-shadow` for the neutral rest shadow, `composer-halo` for the
- * session composer's focus glow, or `approval-glow` while a decision is
- * pending — because which shadow a pane wears at this instant is the caller's
- * state, not the material's. A hue is mixed INTO the tint with `glass-accent`
- * (picked chip, tip card) or `glass-warn` (incognito chip), and `glass-hover`
- * brightens an interactive pane a step on hover — all three swap `--glass-tint`
- * on the host (index.css), so the pane stays the same material. The accent
- * focus glow is the composer's alone: the material itself never lights up in
- * the theme color. The optics are not open for override here — change the
- * recipe, not the call site.
+ * owns — `glass-shadow` for the neutral rest shadow (the session composer
+ * included), or `approval-glow` while a decision is pending — because which
+ * shadow a pane wears at this instant is the caller's state, not the
+ * material's. A hue is mixed INTO the tint with `glass-accent` (picked chip,
+ * tip card) or `glass-warn` (incognito chip), and `glass-hover` brightens an
+ * interactive pane a step on hover — all three swap `--glass-tint` on the host
+ * (index.css), so the pane stays the same material. Focus never lights the
+ * material in the theme color: the focus cue is the material's own tint and
+ * edge step (`.glass-shadow:focus-within`). The optics are not open for
+ * override here — change the recipe, not the call site.
  */
 import { forwardRef, type ReactElement, type Ref } from 'react'
 import { LiquidGlass, type GlassHostTag, type LiquidGlassOwnProps, type LiquidGlassProps } from './ui/liquid-glass'
@@ -39,8 +42,8 @@ import { LiquidGlass, type GlassHostTag, type LiquidGlassOwnProps, type LiquidGl
 export type GlassVariant = 'panel' | 'chip'
 
 const RECIPE: Record<GlassVariant, Pick<LiquidGlassOwnProps, 'frost' | 'lightIntensity'>> = {
-  panel: { frost: 6, lightIntensity: 25 },
-  chip: { frost: 4, lightIntensity: 18 },
+  panel: { frost: 3, lightIntensity: 25 },
+  chip: { frost: 2, lightIntensity: 18 },
 }
 
 export type GlassProps<T extends GlassHostTag = 'div'> = Omit<LiquidGlassProps<T>, 'cornerRadius' | 'frost' | 'lightIntensity'> & {

@@ -12,7 +12,7 @@
  *     height is cancelled with a negative top margin so it overlays the
  *     scroller's last 24px above the composer.
  *   - <JumpToBottomButton> goes inside a `relative` wrapper around the
- *     composer block; it floats 40px above it, centred, and is pointer-inert
+ *     composer block; it floats 56px above it (`-top-14`), centred, and is pointer-inert
  *     except for the pill itself.
  *
  */
@@ -44,7 +44,10 @@ export function JumpToBottomButton({ visible, onClick }: {
 }) {
   if (!visible) return null
   return (
-    <div className="absolute -top-10 inset-x-0 z-10 pointer-events-none flex justify-center">
+    // 24px of clear page between the pill and the dock pane (56px up, 32px
+    // tall): at 8px the glass pill read as tucked under the glass dock, one
+    // pane bleeding into the other.
+    <div className="absolute -top-14 inset-x-0 z-10 pointer-events-none flex justify-center">
       {/* A glass pill (components/Glass.tsx, chip variant) rendered as the
           button: the same material as the composer it floats above. */}
       <Glass

@@ -103,6 +103,14 @@ const DEPTH = 0.45;
  *  and a faint white on smoked glass). lightIntensity scales it: at 25 the band
  *  is the full token, the chip variant's 18 is ~70% of it. */
 const BAND_FULL_LIGHT = 25;
+/** How far the bevel's inner glow reaches in from the top and bottom edges, as a
+ *  multiple of the bevel width. Measured on the reference material over black:
+ *  about +30 of brightness fading in over ~5pt, so the pane reads as lit from its
+ *  rim rather than as a flat tinted board. */
+const BEVEL_REACH = 2.5;
+/** White alpha of that glow at full light (25 = 12%); the chip variant's 18
+ *  lands at ~8.6%. */
+const BEVEL_GLOW = 0.48;
 /** How far the bend spreads inward from the rim: flattens the profile's shoulder. */
 const SHOULDER = 1 - 0.62 * 0.18;
 /** Refractive index of the bevel. Roughly crown glass. */
@@ -330,7 +338,8 @@ function LiquidGlassImpl(
   const displacement = REFRACTION * band * 2;
 
   const light = clamp01(lightIntensity / 100);
-  const bevel = Math.max(1, band * 0.42);
+  const bevel = Math.max(1, band * 0.42) * BEVEL_REACH;
+  const glow = BEVEL_GLOW * light;
 
   /**
    * Every layer is clipped by its own border-radius — which is also what clips a
@@ -457,10 +466,10 @@ function LiquidGlassImpl(
             `0 0.5px 0 0 var(--glass-hairline)`,
             `inset 0px ${bevel.toFixed(2)}px ${(bevel * 1.15).toFixed(2)}px ${(-bevel * 0.5).toFixed(
               2
-            )}px rgba(255,255,255,${(0.2 * light).toFixed(3)})`,
+            )}px rgba(255,255,255,${glow.toFixed(3)})`,
             `inset 0px ${(-bevel).toFixed(2)}px ${(bevel * 1.15).toFixed(2)}px ${(-bevel * 0.5).toFixed(
               2
-            )}px rgba(255,255,255,${(0.2 * light).toFixed(3)})`,
+            )}px rgba(255,255,255,${glow.toFixed(3)})`,
             `inset 0 0 ${(bevel * 0.9).toFixed(2)}px rgba(0,0,0,${(0.1 * light).toFixed(3)})`,
           ].join(", "),
         }}

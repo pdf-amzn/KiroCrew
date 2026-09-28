@@ -8359,7 +8359,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   `svh` not `%` (a percentage resolves against this wrapper's own
                   content-derived height, so it computes to none) and not `vh`
                   (which over-measures a phone showing its URL bar). Scoped to
-                  the bars: FlyingQuote, the composer and the `absolute -top-10`
+                  the bars: FlyingQuote, the composer and the `absolute -top-14`
                   scroll-to-bottom button must all stay outside the scroll box.
                   `pb-[11px] mb-[-11px]` cancels QueueStack's OVERLAP: its -11px
                   fuse margin is what pulls the queue card into the composer, and
