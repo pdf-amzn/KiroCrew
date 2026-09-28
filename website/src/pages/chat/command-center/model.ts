@@ -37,6 +37,8 @@ export interface PendingQuestion {
 }
 export interface PendingApproval {
   id: string
+  /** Minted per request by the coordinator; echoed so a stale card cannot resolve a reused id. */
+  instance?: string
   request_mid?: string
   slot?: string
   source?: string
@@ -131,7 +133,10 @@ export function buildCommandCenter(source: CommandCenterSources) {
   }
   for (const approval of source.approvals) {
     const slot = slotKey(approval.slot || '')
-    if (keys.has(slot)) addAttention({ id: `approval:${slot}:${approval.id}`, slot, kind: 'approval', native: false, approval,
+    // The coordinator mints `instance` because a caller's approval id can
+    // recur. Both render sites key the card by this id, so a replacement
+    // request must not reconcile onto a card whose decision already landed.
+    if (keys.has(slot)) addAttention({ id: `approval:${slot}:${approval.id}:${approval.instance || ''}`, slot, kind: 'approval', native: false, approval,
       approvalMode: effectiveApprovalMode(source.approvalMode || 'normal', slots.find(s => s.key === slot)) })
   }
   for (const s of slots) {

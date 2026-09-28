@@ -786,6 +786,68 @@ def test_safe_html_entities_and_literal_data_survive_without_reserialization():
     assert _redact_card_output(json.dumps({"data": {"renamed": literal}}), original) is None
 
 
+_SPLIT_LABEL_MARKUP = "<p><b>aws_secret_access_key:</b> <code>" + "A" * 40 + "</code></p>"
+
+
+def test_markup_cannot_hold_a_labelled_credential_apart_from_its_label():
+    """A labelled credential is one run of text; a tag between the label and the
+    value misleads a raw scan, not the browser. The output side refuses
+    the card. Negative control: the same text with the tag boundary closed is caught
+    by the raw scan, and a layout that names the label with no value publishes."""
+    import json
+
+    from kiro_crew.dashboard.card_lifecycle import _redact, _redact_card_output
+
+    # The raw scan takes the closing tag for the value: label gone, value kept.
+    assert "A" * 40 in _redact(_SPLIT_LABEL_MARKUP)
+    assert _redact_card_output(json.dumps({"html": _SPLIT_LABEL_MARKUP, "data": {}}), None) is None
+    joined = "<p>aws_secret_access_key: " + "A" * 40 + "</p>"
+    assert _redact(joined) != joined
+    # Parity with plain text is the bar: a value the text scan takes for the
+    # credential is refused here too, and a label with no value publishes.
+    assert (
+        _redact_card_output(
+            json.dumps(
+                {"html": "<p><b>aws_secret_access_key:</b> <code>rotated</code></p>", "data": {}}
+            ),
+            None,
+        )
+        is None
+    )
+    labelled = {"html": "<p><b>aws_secret_access_key:</b> <code></code></p>", "data": {}}
+    assert _redact_card_output(json.dumps(labelled), None) is not None
+
+
+@pytest.mark.asyncio
+async def test_model_input_omits_a_message_whose_markup_splits_a_labelled_credential(
+    lifecycle, monkeypatch
+):
+    """The input side omits the whole message, as it does an oversized one: the raw
+    scan cannot place the value, so nothing of it may reach the model. A sibling
+    message without the split is delivered."""
+    import json
+
+    from kiro_crew.dashboard import card_lifecycle
+
+    service, slot, state = lifecycle
+    slot.messages = [
+        {"role": "assistant", "content": "Release evidence attached"},
+        {"role": "tool_result", "content": _SPLIT_LABEL_MARKUP},
+    ]
+    prompts = []
+
+    async def generate(sessions, prompt, **kwargs):
+        prompts.append(prompt)
+        return json.dumps({"html": "<p>ok</p>", "data": {}})
+
+    monkeypatch.setattr(card_lifecycle, "run_bg_oneliner", generate)
+    service.notify(slot, "done")
+    await asyncio.wait_for(service.worker, 2)
+    assert prompts and "A" * 40 not in prompts[0]
+    assert "aws_secret_access_key" not in prompts[0]
+    assert "Release evidence attached" in prompts[0]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("padding", ['"', "界"])
 async def test_maximum_previous_card_leaves_room_for_escaped_recent_evidence(

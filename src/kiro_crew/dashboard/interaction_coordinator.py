@@ -53,6 +53,10 @@ class ApprovalCoordinator:
         state._approval_futures[approval_id] = future
         state._pending_approvals[approval_id] = {
             "id": approval_id,
+            # The request id is the caller's and can recur; this names THIS
+            # request, so a card rendered from an earlier record with the same
+            # id cannot resolve its replacement.
+            "instance": uuid.uuid4().hex,
             "source": source,
             "tool": _redact(tool, redact_url, redact_secret),
             "tool_input": _redact(tool_input, redact_url, redact_secret),
