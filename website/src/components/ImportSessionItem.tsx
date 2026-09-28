@@ -1,9 +1,11 @@
-import { useId, useRef, useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
+import { useEffect, useId, useRef, useState } from 'react'
 import { Check, Upload, Loader2 } from 'lucide-react'
 import { api } from '../api/client'
 import { ApiError } from '../api/apiError'
 import { parseErrorCode } from '../utils/errorReport'
+import { useAppDispatch } from '../store'
+import { fetchSlots } from '../store/dashboardSlice'
+import { switchSlot } from '../store/chatSlice'
 import ErrorNotice, {
   ErrorNoticeMenuItem,
   type ErrorNoticeMenuItemComponent,
@@ -49,7 +51,52 @@ function refusalMessage(e: unknown): string {
   return i18nT('components.importSessionItem.unknown_error')
 }
 
-/** Outcome of the most recent import attempt in this open menu. */
+/** A hint for the picker's default filter only: the endpoint sniffs the bytes,
+ *  so a user who renamed or unpacked the file is not locked out by it. */
+const ACCEPT = '.gz,.json,application/gzip,application/json'
+
+/** The input of the pick in progress, so a pick the user cancelled in an
+ *  engine that fires no `cancel` event is reclaimed by the next one. */
+let pendingInput: HTMLInputElement | null = null
+
+/**
+ * Open the OS file picker from an input the MENU does not own.
+ *
+ * A native picker takes window focus, and Radix menus close on window `blur`
+ * (`@radix-ui/react-menu`), which unmounts every item — so an input rendered
+ * inside the item is detached before the user confirms, its `change` event
+ * never reaches React's root listener, and the pick is silently dropped. This
+ * input lives on `document.body` with a native listener and removes itself
+ * once the pick resolves.
+ */
+export function pickSessionFile(onFile: (file: File) => void): void {
+  pendingInput?.remove()
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = ACCEPT
+  input.setAttribute('aria-hidden', 'true')
+  input.tabIndex = -1
+  input.style.position = 'fixed'
+  input.style.left = '-9999px'
+  input.style.width = '1px'
+  input.style.height = '1px'
+  input.style.opacity = '0'
+  const done = () => {
+    input.remove()
+    if (pendingInput === input) pendingInput = null
+  }
+  input.addEventListener('change', () => {
+    const file = input.files?.[0]
+    done()
+    if (file) onFile(file)
+  })
+  input.addEventListener('cancel', done)
+  document.body.appendChild(input)
+  pendingInput = input
+  input.click()
+}
+
+/** Outcome of the most recent import attempt, while the row is still mounted. */
 type ImportState =
   | { kind: 'idle' }
   | { kind: 'importing' }
@@ -79,34 +126,48 @@ interface ImportSessionItemProps {
  * user who unpacked the archive by hand is not thereby holding a file the
  * product refuses.
  *
- * **The menu deliberately stays open on select** and the outcome renders on the
- * row, matching `ExportSessionItem` and `SendToInstanceSubmenu`. A new session
- * appearing in the sidebar is easy to miss, and there is no toast primitive in
- * this app; the sibling convention is an inline note next to the control, and
- * the row IS the control.
+ * **The outcome does not depend on the menu staying open.** Selecting the row
+ * prevents the select-close, but the picker itself blurs the window and Radix
+ * closes the menu then anyway. So a success OPENS the imported session — the
+ * one signal that survives the menu — and a refusal the unmounted row can no
+ * longer show is raised as an alert. While the row is still mounted it also
+ * reports the outcome inline.
  */
 export default function ImportSessionItem({ Item }: ImportSessionItemProps) {
   const errorId = useId()
+  const dispatch = useAppDispatch()
   const [state, setState] = useState<ImportState>({ kind: 'idle' })
-  const inputRef = useRef<HTMLInputElement>(null)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
-  const importMutation = useMutation({
-    mutationFn: (file: File) => api.importSessionFromFile(file),
-    onMutate: () => { setState({ kind: 'importing' }) },
-    onSuccess: (r) => { setState({ kind: 'done', title: r.title }) },
-    onError: (e) => {
-      setState({ kind: 'error', message: refusalMessage(e) })
-    },
-  })
+  const importFile = async (file: File) => {
+    if (mountedRef.current) setState({ kind: 'importing' })
+    try {
+      const r = await api.importSessionFromFile(file)
+      if (mountedRef.current) setState({ kind: 'done', title: r.title })
+      // The slot list first, so the switch lands on a row the sidebar knows.
+      await dispatch(fetchSlots())
+      dispatch(switchSlot({ key: r.key, announceOnMissing: true }))
+    } catch (e) {
+      const message = refusalMessage(e)
+      if (mountedRef.current) {
+        setState({ kind: 'error', message })
+      } else {
+        window.alert(`${i18nT('components.importSessionItem.failed')}: ${message}`)
+      }
+    }
+  }
 
   return (
     <>
       <Item
         disabled={state.kind === 'importing'}
         onSelect={(event: Event) => {
-          // Keep the menu open so the row can report the outcome.
           event.preventDefault()
-          inputRef.current?.click()
+          pickSessionFile((file) => { void importFile(file) })
         }}
       >
         <Upload size={13} className="shrink-0 text-muted" />
@@ -117,26 +178,6 @@ export default function ImportSessionItem({ Item }: ImportSessionItemProps) {
         <span className="grow truncate">
           {i18nT('components.importSessionItem.import_from_file')}
         </span>
-        {/* Off-screen rather than `display:none`: a hidden input is still the
-            accessible file control, and `.click()` on a display-none element is
-            ignored by some engines. `accept` is a HINT for the picker's default
-            filter only -- the endpoint sniffs the bytes, so a user who renamed
-            or unpacked the file is not locked out by it. */}
-        <input
-          ref={inputRef}
-          type="file"
-          accept=".gz,.json,application/gzip,application/json"
-          className="sr-only"
-          aria-label={i18nT('components.importSessionItem.import_from_file')}
-          onClick={(e) => e.stopPropagation()}
-          onChange={(e) => {
-            const file = e.target.files?.[0]
-            // Reset so choosing the SAME file twice fires change twice; without
-            // it the second import silently does nothing.
-            e.target.value = ''
-            if (file) importMutation.mutate(file)
-          }}
-        />
         {state.kind === 'importing' && (
           <Loader2 size={13} className="ml-auto shrink-0 animate-spin text-muted" />
         )}

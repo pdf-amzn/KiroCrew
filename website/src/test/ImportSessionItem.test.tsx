@@ -10,8 +10,9 @@
  *   (1) the file's BYTES are posted as they came off disk — no gunzip, no
  *       re-encode, no JSON wrapper — because the endpoint decides the format
  *       from them and a browser that unpacked first would defeat that;
- *   (2) the menu stays open and the outcome lands on the row, matching the
- *       export sibling, because a new session in the sidebar is easy to miss;
+ *   (2) the pick survives the menu closing: the picker blurs the window and
+ *       Radix closes the menu on blur, so the file input must not live in the
+ *       row, and the imported session is opened so the outcome is visible;
  *   (3) a refusal surfaces the endpoint's own message rather than a generic one;
  *   (4) the same file can be chosen twice and imports twice, which is the
  *       documented "import only ever adds" behaviour and is defeated by a file
@@ -21,13 +22,19 @@ import * as React from 'react'
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 const mocks = vi.hoisted(() => ({ importSessionFromFile: vi.fn() }))
 vi.mock('../api/client', () => ({
   api: new Proxy(mocks as Record<string, unknown>, {
     get: (t, p: string) => (p in t ? t[p] : vi.fn().mockResolvedValue([])),
   }),
+}))
+
+const switched = vi.hoisted(() => [] as unknown[])
+vi.mock('../store', () => ({ useAppDispatch: () => (a: unknown) => a }))
+vi.mock('../store/dashboardSlice', () => ({ fetchSlots: () => ({ type: 'test/fetchSlots' }) }))
+vi.mock('../store/chatSlice', () => ({
+  switchSlot: (arg: unknown) => { switched.push(arg); return { type: 'test/switchSlot' } },
 }))
 
 import ImportSessionItem from '../components/ImportSessionItem'
@@ -53,18 +60,21 @@ function StubItem({ disabled, onSelect, children }: {
 
 function renderRow() {
   return render(
-    <QueryClientProvider
-      client={new QueryClient({
-        defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-      })}
-    >
-      <ImportSessionItem Item={StubItem} />
-    </QueryClientProvider>,
+    <ImportSessionItem Item={StubItem} />,
   )
 }
 
-function fileInput() {
-  return screen.getByLabelText(/import a session from a file/i) as HTMLInputElement
+/** The input the row opened the picker from — owned by `document.body`. */
+function pickerInput() {
+  return document.body.querySelector('input[type="file"]') as HTMLInputElement | null
+}
+
+/** Select the row, then choose `file` in the picker it opened. */
+async function pick(file: File) {
+  await userEvent.click(screen.getByTestId('row'))
+  const input = pickerInput()
+  expect(input).not.toBeNull()
+  await userEvent.upload(input!, file)
 }
 
 const GZ_MAGIC = new Uint8Array([0x1f, 0x8b, 0x08, 0x00])
@@ -79,6 +89,8 @@ function exportedFile(name = 'chat.kcsession.json.gz') {
 describe('ImportSessionItem', () => {
   beforeEach(() => {
     mocks.importSessionFromFile.mockReset()
+    switched.length = 0
+    pickerInput()?.remove()
     mocks.importSessionFromFile.mockResolvedValue({
       ok: true,
       key: 'imported-1',
@@ -92,7 +104,7 @@ describe('ImportSessionItem', () => {
     renderRow()
     const picked = exportedFile()
 
-    await userEvent.upload(fileInput(), picked)
+    await pick(picked)
 
     await waitFor(() => expect(mocks.importSessionFromFile).toHaveBeenCalledTimes(1))
     const sent = mocks.importSessionFromFile.mock.calls[0][0] as File
@@ -106,7 +118,7 @@ describe('ImportSessionItem', () => {
   it('names what landed, not just that something did', async () => {
     renderRow()
 
-    await userEvent.upload(fileInput(), exportedFile())
+    await pick(exportedFile())
 
     // The title, because a new session appears somewhere in a sidebar that may be
     // scrolled or collapsed and this row is the only place that knows which one
@@ -124,7 +136,7 @@ describe('ImportSessionItem', () => {
     })
     renderRow()
 
-    await userEvent.upload(fileInput(), exportedFile())
+    await pick(exportedFile())
 
     expect(await screen.findByText(/^Imported$/)).toBeInTheDocument()
   })
@@ -135,7 +147,7 @@ describe('ImportSessionItem', () => {
     )
     renderRow()
 
-    await userEvent.upload(fileInput(), exportedFile())
+    await pick(exportedFile())
 
     expect(
       await screen.findByText(/could not decompress the bundle/i),
@@ -155,7 +167,7 @@ describe('ImportSessionItem', () => {
     )
     renderRow()
 
-    await userEvent.upload(fileInput(), exportedFile())
+    await pick(exportedFile())
 
     expect(await screen.findByText(/this file is too large to import/i)).toBeInTheDocument()
     expect(screen.queryByText(/bundle/i)).not.toBeInTheDocument()
@@ -170,7 +182,7 @@ describe('ImportSessionItem', () => {
     )
     renderRow()
 
-    await userEvent.upload(fileInput(), exportedFile())
+    await pick(exportedFile())
 
     expect(await screen.findByText(/bundle carries no messages/i)).toBeInTheDocument()
   })
@@ -179,14 +191,14 @@ describe('ImportSessionItem', () => {
     renderRow()
     const picked = exportedFile()
 
-    await userEvent.upload(fileInput(), picked)
+    await pick(picked)
     await waitFor(() => expect(mocks.importSessionFromFile).toHaveBeenCalledTimes(1))
-    await userEvent.upload(fileInput(), picked)
+    await pick(picked)
 
-    // Two sessions, not one: the input clears its value after each pick, so the
-    // second choice of the SAME file still fires a change event.
+    // Two sessions, not one: each pick uses a fresh input, so the second choice
+    // of the SAME file still fires a change event.
     await waitFor(() => expect(mocks.importSessionFromFile).toHaveBeenCalledTimes(2))
-    expect(fileInput().value).toBe('')
+    expect(pickerInput()).toBeNull()
   })
 
   it('shows a spinner and disables the row while the import is in flight', async () => {
@@ -198,7 +210,7 @@ describe('ImportSessionItem', () => {
     )
     renderRow()
 
-    await userEvent.upload(fileInput(), exportedFile())
+    await pick(exportedFile())
 
     // The row disables itself so a second pick cannot race the first.
     await waitFor(() => expect(screen.getByTestId('row')).toBeDisabled())
@@ -227,7 +239,7 @@ describe('ImportSessionItem', () => {
       )
       const { unmount } = renderRow()
 
-      await userEvent.upload(fileInput(), exportedFile())
+      await pick(exportedFile())
 
       expect((await screen.findAllByText(pattern)).length).toBeGreaterThan(0)
       // The endpoint's own English wording is never shown for a recognised code.
@@ -242,7 +254,7 @@ describe('ImportSessionItem', () => {
     mocks.importSessionFromFile.mockRejectedValue('a bare string, no .message')
     renderRow()
 
-    await userEvent.upload(fileInput(), exportedFile())
+    await pick(exportedFile())
 
     // The generic fallback copy, matched exactly so it does not collide with the
     // "Failed" title; it renders in both the inline notice and the menu-item one.
@@ -271,11 +283,7 @@ describe('ImportSessionItem', () => {
       )
     }
     render(
-      <QueryClientProvider
-        client={new QueryClient({ defaultOptions: { mutations: { retry: false } } })}
-      >
-        <ImportSessionItem Item={Recorder} />
-      </QueryClientProvider>,
+      <ImportSessionItem Item={Recorder} />,
     )
 
     await userEvent.click(screen.getByTestId('row'))
@@ -284,5 +292,38 @@ describe('ImportSessionItem', () => {
     // that closes takes the outcome note with it.
     expect(selects).toHaveLength(1)
     expect(selects[0].defaultPrevented).toBe(true)
+  })
+
+  it('still imports when the menu unmounts while the picker is open', async () => {
+    // The real sequence: the native picker blurs the window, Radix closes the
+    // menu on blur, and the row unmounts BEFORE the user confirms a file.
+    const { unmount } = renderRow()
+    await userEvent.click(screen.getByTestId('row'))
+    const input = pickerInput()
+    unmount()
+
+    await userEvent.upload(input!, exportedFile())
+
+    await waitFor(() => expect(mocks.importSessionFromFile).toHaveBeenCalledTimes(1))
+    // The imported session is opened: the one outcome signal that survives
+    // the menu having closed.
+    await waitFor(() => expect(switched).toEqual([{ key: 'imported-1', announceOnMissing: true }]))
+    expect(pickerInput()).toBeNull()
+  })
+
+  it('alerts a refusal the unmounted row can no longer show', async () => {
+    mocks.importSessionFromFile.mockRejectedValue(new Error('could not decompress the bundle'))
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {})
+    const { unmount } = renderRow()
+    await userEvent.click(screen.getByTestId('row'))
+    const input = pickerInput()
+    unmount()
+
+    await userEvent.upload(input!, exportedFile())
+
+    await waitFor(() => expect(alert).toHaveBeenCalledTimes(1))
+    expect(alert.mock.calls[0][0]).toMatch(/could not decompress the bundle/)
+    expect(switched).toEqual([])
+    alert.mockRestore()
   })
 })
