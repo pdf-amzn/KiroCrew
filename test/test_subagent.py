@@ -2225,6 +2225,191 @@ class TestSubagentUsageRow:
         assert persist.await_args.kwargs["agent"] == "researcher"
 
 
+class TestHeavyCommandHold:
+    """A shell permission request goes through the heavy-command hold before it
+    is answered, so a test run or build waits while host memory is critical."""
+
+    @pytest.mark.asyncio
+    async def test_a_shell_request_is_held_then_approved(self) -> None:
+        from kiro_crew.hooks import ToolHookResult
+        from kiro_crew.providers.base import EVENT_PERMISSION_REQUEST, LLMEvent
+        from kiro_crew.subagent import SubagentInfo
+
+        event = LLMEvent(
+            kind=EVENT_PERMISSION_REQUEST,
+            title="Run tests",
+            request_id=9001,
+            shell_classified=True,
+            is_shell=True,
+            tool_input='{"command": "pytest -q"}',
+        )
+        sessions = _mock_sessions()
+        sessions.get_approval_policy = MagicMock(return_value="auto")
+        provider = sessions.get_or_create.return_value[0]
+
+        async def _stream(*_a, **_kw):
+            yield event
+
+        provider.stream = MagicMock(side_effect=lambda *a, **kw: _stream())
+        provider.approve_tool = AsyncMock()
+        provider.reject_tool = AsyncMock()
+        ctx = MagicMock()
+        ctx.build_message = MagicMock(return_value=("msg", None))
+        ctx.hooks.on_tool_call = MagicMock(return_value=ToolHookResult.allow())
+        manager = SubagentManager(sessions=sessions, ctx_builder=ctx, default_turn_limit=1)
+        info = SubagentInfo(
+            execution_context=execution_for_store(""),
+            id="heavy01",
+            task="t",
+            parent_session_key="dashboard:default",
+        )
+        manager._log_spawned(info)
+        manager._agents["heavy01"] = info
+        order: list[str] = []
+
+        async def _hold(command, **_kw):
+            order.append(f"hold:{command}")
+            return 12.0
+
+        provider.approve_tool.side_effect = lambda *_a, **_k: order.append("approve")
+        with (
+            patch("kiro_crew.subagent.hold_heavy_command", side_effect=_hold),
+            patch("kiro_crew.subagent.Stats"),
+            patch("kiro_crew.subagent.sel"),
+            patch("kiro_crew.subagent.update_state"),
+            patch("kiro_crew.subagent.create_agent_folder", MagicMock(), create=True),
+        ):
+            await manager._run_inner(info, "subagent:heavy01")
+
+        assert order == ["hold:pytest -q", "approve"]
+
+    def _shell_request_manager(self, policy: str, event):
+        """A manager streaming one shell permission *event* under *policy*."""
+        from kiro_crew.hooks import ToolHookResult
+        from kiro_crew.subagent import SubagentInfo
+
+        sessions = _mock_sessions()
+        sessions.get_approval_policy = MagicMock(return_value=policy)
+        provider = sessions.get_or_create.return_value[0]
+
+        async def _stream(*_a, **_kw):
+            yield event
+
+        provider.stream = MagicMock(side_effect=lambda *a, **kw: _stream())
+        provider.approve_tool = AsyncMock()
+        provider.reject_tool = AsyncMock()
+        ctx = MagicMock()
+        ctx.build_message = MagicMock(return_value=("msg", None))
+        ctx.hooks.on_tool_call = MagicMock(return_value=ToolHookResult.allow())
+        manager = SubagentManager(sessions=sessions, ctx_builder=ctx, default_turn_limit=1)
+        info = SubagentInfo(
+            execution_context=execution_for_store(""),
+            id="heavy02",
+            task="t",
+            parent_session_key="dashboard:default",
+        )
+        manager._log_spawned(info)
+        manager._agents["heavy02"] = info
+        return manager, info, provider
+
+    @staticmethod
+    def _shell_event():
+        from kiro_crew.providers.base import EVENT_PERMISSION_REQUEST, LLMEvent
+
+        return LLMEvent(
+            kind=EVENT_PERMISSION_REQUEST,
+            title="Run tests",
+            request_id=9002,
+            shell_classified=True,
+            is_shell=True,
+            tool_input='{"command": "pytest -q"}',
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_shell_request_is_never_held(self) -> None:
+        """No policy and no approver: the request is denied by default, and a
+        denied command must not sit in the memory hold first."""
+        manager, info, provider = self._shell_request_manager("ask", self._shell_event())
+        manager._on_tool_approval = None
+        manager._on_tool_approval_factory = None
+        order: list[str] = []
+
+        async def _hold(command, **_kw):
+            order.append(f"hold:{command}")
+            return 0.0
+
+        provider.reject_tool.side_effect = lambda *_a, **_k: order.append("reject")
+        with (
+            patch("kiro_crew.subagent.hold_heavy_command", side_effect=_hold),
+            patch("kiro_crew.subagent.Stats"),
+            patch("kiro_crew.subagent.sel"),
+            patch("kiro_crew.subagent.update_state"),
+            patch("kiro_crew.subagent.create_agent_folder", MagicMock(), create=True),
+        ):
+            await manager._run_inner(info, "subagent:heavy02")
+
+        assert order == ["reject"]
+        provider.approve_tool.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_factory_rejected_shell_request_is_never_held(self) -> None:
+        """The interactive approver sees the card at once (no hold in front of
+        it) and its refusal answers the request without ever waiting."""
+        manager, info, provider = self._shell_request_manager("ask", self._shell_event())
+        order: list[str] = []
+
+        async def _approve_cb(_event):
+            order.append("card")
+            return False
+
+        manager._on_tool_approval_factory = lambda _info: _approve_cb
+
+        async def _hold(command, **_kw):
+            order.append(f"hold:{command}")
+            return 0.0
+
+        provider.reject_tool.side_effect = lambda *_a, **_k: order.append("reject")
+        with (
+            patch("kiro_crew.subagent.hold_heavy_command", side_effect=_hold),
+            patch("kiro_crew.subagent.Stats"),
+            patch("kiro_crew.subagent.sel"),
+            patch("kiro_crew.subagent.update_state"),
+            patch("kiro_crew.subagent.create_agent_folder", MagicMock(), create=True),
+        ):
+            await manager._run_inner(info, "subagent:heavy02")
+
+        assert order == ["card", "reject"]
+        provider.approve_tool.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_hold_sits_after_the_human_approves(self) -> None:
+        """An interactive grant shows the card first, then holds, then approves."""
+        manager, info, provider = self._shell_request_manager("ask", self._shell_event())
+        order: list[str] = []
+
+        async def _approve_cb(_event):
+            order.append("card")
+            return True
+
+        manager._on_tool_approval_factory = lambda _info: _approve_cb
+
+        async def _hold(command, **_kw):
+            order.append(f"hold:{command}")
+            return 5.0
+
+        provider.approve_tool.side_effect = lambda *_a, **_k: order.append("approve")
+        with (
+            patch("kiro_crew.subagent.hold_heavy_command", side_effect=_hold),
+            patch("kiro_crew.subagent.Stats"),
+            patch("kiro_crew.subagent.sel"),
+            patch("kiro_crew.subagent.update_state"),
+            patch("kiro_crew.subagent.create_agent_folder", MagicMock(), create=True),
+        ):
+            await manager._run_inner(info, "subagent:heavy02")
+
+        assert order == ["card", "hold:pytest -q", "approve"]
+
+
 class TestIdentityTrustedChildParentPolicyAuto:
     """A low-fidelity child MCP permission event whose canonical identity IS
     verified (remote server streamed no rawInput) honors an

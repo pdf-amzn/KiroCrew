@@ -330,46 +330,6 @@ def read_learned_cost(
     return max(costs.values()) if costs else None
 
 
-def learned_cost_for(costs: Mapping[str, float], agent: str) -> float | None:
-    """The learned figure for one spawn: *agent*'s own p90, or None.
-
-    The cap is sized from the heaviest agent because it bounds the whole host;
-    a single start is priced at what THAT agent's own dedicated runs have cost
-    here, so one build-heavy agent's history does not hold every other spawn to
-    its price. A bucket with no qualifying dedicated history answers None and
-    the caller prices from the configured cost plus whatever live dedicated
-    peaks it can see -- NOT from the heaviest known bucket: on a backend where
-    session sharing is the default, a share-eligible agent records only shared
-    samples, so its own bucket never forms, and a heaviest-known fallback would
-    price every one of its spawns at an unrelated agent's figure for good.
-    """
-    if not costs:
-        return None
-    return costs.get(agent or _DEFAULT_AGENT)
-
-
-def cost_log_identity() -> tuple[object, ...] | None:
-    """The log's ``(device, inode, size)``, ``None`` when absent, ``("unknown",)`` when
-    present but not inspectable.
-
-    Lets a reader tell a log that was REPLACED -- deleted and re-created by the
-    next sample within one sweep (``append_cost_sample`` re-creates the path at
-    once), or rewritten by compaction -- apart from one that merely grew: a new
-    inode, or a size that shrank, means the records it held before are gone and
-    a figure learned from them must not be carried over. Only
-    ``FileNotFoundError`` means absent; any other stat failure is reported as
-    present-but-unknown, the conservative reading for a caller deciding whether
-    to drop a figure it already holds.
-    """
-    try:
-        st = os.stat(_cost_log_path())
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return ("unknown",)
-    return (st.st_dev, st.st_ino, st.st_size)
-
-
 def compact_cost_log(window: int = _DEFAULT_WINDOW) -> None:
     """FIFO-trim the log to the last ``window`` samples per (agent, shared) (atomic).
 

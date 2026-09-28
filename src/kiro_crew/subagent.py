@@ -143,7 +143,7 @@ from kiro_crew.providers.base import (
     EVENT_TOOL_RESULT,
     LLMEvent,
 )
-from kiro_crew.resource_status import cached_admission_check
+from kiro_crew.resource_status import cached_admission_check, hold_heavy_command
 from kiro_crew.sandbox import _agents_slice_cgroup_dir
 from kiro_crew.security import (
     redact_and_truncate,
@@ -165,15 +165,9 @@ from kiro_crew.subagent_completion_meta import (
     single_completion_meta,
 )
 from kiro_crew.subagent_cost import (
-    _SAMPLE_MAX_AGE_SECS,
     append_cost_sample,
-    cap_buckets,
     compact_cost_log,
-    cost_log_identity,
-    learned_cost_for,
     read_learned_cost,
-    read_learned_costs,
-    read_learned_costs_checked,
 )
 from kiro_crew.subagent_manager import (
     CancellationCoordinator,
@@ -1839,28 +1833,11 @@ def _live_dedicated(agents: list[SubagentInfo]) -> tuple[list[SubagentInfo], lis
     return live, [info for info in live if not info._session_sharing]
 
 
-def _effective_next_start_gb(
-    agents: list[SubagentInfo], *, cost_gb: float, next_start_gb: float | None
-) -> float:
-    """What the NEXT dedicated start is actually priced at.
-
-    The larger of the configured cost, the caller's learned figure and every
-    live dedicated peak: a worker observed above the learned p90 is evidence
-    that starts on this host can cost that much. Shared by the reserve and by
-    the gate's deferral record, so the price an operator is shown is the price
-    the arithmetic used.
-    """
-    _live, dedicated = _live_dedicated(agents)
-    expected = max([0.0, cost_gb, *(info.peak_rss_gb for info in dedicated)])
-    return max([expected, next_start_gb if next_start_gb is not None else 0.0])
-
-
 def _startup_memory_reserve_gb(
     agents: list[SubagentInfo],
     *,
     running_count: int,
     cost_gb: float,
-    next_start_gb: float | None = None,
 ) -> float:
     """Memory promised to cold dedicated starts but not observed in RSS yet.
 
@@ -1870,32 +1847,28 @@ def _startup_memory_reserve_gb(
     reservation. Until sharing is known, a row is priced as a warming
     dedicated start, since it may yet become one.
 
-    Two prices, because two kinds of worker are live at once:
+    Every start is priced at ``cost_gb`` (``agent.subagent_cost_gb``): what a
+    runtime needs to START, not what the work it later runs may grow to. A
+    run's peak RSS is its whole process subtree -- test suites, builds and MCP
+    servers it launched included -- so pricing the next start at a learned p90
+    or a live peak held ordinary spawns at 10 GB+ on a laptop while the start
+    itself needs a fraction of that. Heavy WORK is held where it happens
+    instead (``resource_status.hold_heavy_command``, bounded by
+    ``HEAVY_COMMAND_HOLD_SECS``).
 
-    * A start that is not SETTLED yet -- the next one, a claim awaiting
-      registration, and a dedicated worker fewer than ``_RSS_SAMPLES_TO_SETTLE``
-      sweeps have measured -- owes ``next_start_gb`` (default ``cost_gb``; see
-      :func:`_effective_next_start_gb`) less whatever RSS it already holds. A
-      single reading can land mid-growth, so one sample does not yet say what
-      the worker will weigh; what it holds is subtracted so nothing is counted
-      twice, but the remainder stays reserved at the learned figure.
-    * A SETTLED dedicated worker owes only the gap between the larger of
-      ``cost_gb`` and its OWN peak and what it holds now. Its reservation retires
-      as its RSS is observed: a learned p90 far above what this particular
-      worker turned out to need must not become a phantom reserve that no later
-      sample can close -- and the phantom a warming worker can hold is bounded
-      to the sweeps before it settles.
+    A dedicated worker fewer than ``_RSS_SAMPLES_TO_SETTLE`` sweeps have
+    measured owes ``cost_gb`` less whatever RSS it already holds; a settled one
+    owes nothing, since its memory is already inside the free-memory reading.
     """
     live, dedicated = _live_dedicated(agents)
-    next_start = _effective_next_start_gb(agents, cost_gb=cost_gb, next_start_gb=next_start_gb)
+    cost = max(0.0, cost_gb)
     unregistered = max(0, running_count - sum(not info._slot_released for info in live))
-    gaps = 0.0
-    for info in dedicated:
-        if info._rss_samples < _RSS_SAMPLES_TO_SETTLE:
-            gaps += max(0.0, next_start - info.last_rss_gb)
-        else:
-            gaps += max(0.0, max(cost_gb, info.peak_rss_gb) - info.last_rss_gb)
-    return next_start * (1 + unregistered) + gaps
+    gaps = sum(
+        max(0.0, cost - info.last_rss_gb)
+        for info in dedicated
+        if info._rss_samples < _RSS_SAMPLES_TO_SETTLE
+    )
+    return cost * (1 + unregistered) + gaps
 
 
 def _cost_bucket(agent: str, execution: Any) -> str:
@@ -1912,40 +1885,6 @@ def _cost_bucket(agent: str, execution: Any) -> str:
     if agent:
         return agent
     return str(getattr(execution, "template_id", "") or "")
-
-
-def _startup_cost_gb(agent: Any, learned_gb: float | None) -> float:
-    """What one unmeasured dedicated start is priced at by the spawn guard.
-
-    The larger of the configured first-boot fallback (``subagent_cost_gb``) and
-    *learned_gb*, this run's own bucket's dedicated p90
-    (:func:`~kiro_crew.subagent_cost.read_learned_costs` with ``dedicated_only``,
-    refreshed off-loop by the reaper sweep and held on the manager, so this is
-    arithmetic only; ``None`` when the bucket has no such history). The
-    reserve is the ONLY thing that prices a start between admission and the
-    reaper's first RSS sample (60 s), and a dedicated runtime takes tens of
-    seconds to reach its resident size, so a burst of starts inside that window
-    is bounded by this number alone. Pricing it at the 0.5 GB fallback while the
-    store already knew a ~6 GB p90 let four starts each clear a raw free-memory
-    check and then grow into the same headroom together.
-
-    ``max`` rather than the cap's learned-over-configured
-    (:func:`_host_mem_term`), deliberately: the cap is a COUNT, and a learned
-    cost below the configured one should raise it -- that is what learning is
-    for -- while the reserve is a safety floor against an unrecoverable OOM, so
-    an operator's higher pin must never be lowered by a learned figure.
-    Over-reserving here only defers a start until the next sample; under-reserving
-    is the failure being guarded against.
-    """
-    try:
-        configured = float(agent.subagent_cost_gb)
-    except (AttributeError, TypeError, ValueError):
-        configured = 0.5
-    try:
-        learned = float(learned_gb) if learned_gb is not None else 0.0
-    except (TypeError, ValueError):
-        learned = 0.0
-    return max(configured, learned)
 
 
 def resolve_max_subagents(cfg: KiroCrewConfig) -> int:
@@ -3045,19 +2984,6 @@ class SubagentManager:
         self._completion_keep = completion_keep
         self._completion_keep_chars = completion_keep_chars
         self._running_count = 0
-        # The learned per-run memory p90s (``read_learned_costs("mem_gb")``,
-        # keyed by cost bucket) the spawn guard prices a warming start from
-        # (``learned_cost_for`` → ``_startup_cost_gb``; a bucket with no
-        # dedicated history answers None and the configured cost plus live
-        # peaks prices it). Empty until the first off-loop
-        # refresh: the reaper sweep reads the cost log on the maintenance
-        # executor and publishes here, so the gate -- which runs on the event
-        # loop -- never opens the file itself. Stale by at most one sweep, far
-        # below the rate a 50-sample p90 can move at.
-        self._learned_costs_gb: dict[str, float] = {}
-        # The log identity the map was last merged from (``cost_log_identity``),
-        # so a replaced log -- new inode or shrunk -- is read fresh, not merged.
-        self._learned_costs_source: tuple[object, ...] | None = None
         # Strong refs to in-flight shielded terminal reports (see
         # `_spawn_terminal_report`); drained in `cancel_all`.
         self._report_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
@@ -3699,9 +3625,6 @@ class SubagentManager:
 
     def _sample_live_costs(self) -> None:
         return self._monitor._sample_live_costs_impl()
-
-    def _refresh_learned_cost(self) -> None:
-        return self._monitor._refresh_learned_cost_impl()
 
     def _record_cost(self, info: SubagentInfo) -> None:
         return self._monitor._record_cost_impl(info)
@@ -5663,7 +5586,6 @@ _COMPONENT_GLOBAL_BINDINGS = (
     VERDICT_UNKNOWN,
     VERDICT_WORKING,
     _AGENT_NAME_RE,
-    _SAMPLE_MAX_AGE_SECS,
     _agent_dir,
     _cleanup_session_files_sync,
     _subagents_dir,
@@ -5674,21 +5596,17 @@ _COMPONENT_GLOBAL_BINDINGS = (
     annotate_model_fallback,
     append_cost_sample,
     append_fallback_story,
-    cap_buckets,
     apply_completion_keep,
     asyncio,
     cached_admission_check,
     cap_result_file,
+    hold_heavy_command,
     clear_tombstone,
     compact_cost_log,
     configured_fallback_chain,
     _cost_bucket,
     consult_offloaded,
-    cost_log_identity,
     create_agent_folder,
-    learned_cost_for,
-    read_learned_costs,
-    read_learned_costs_checked,
     evict_completed_agents,
     extract_options,
     fire_tool_hooks,
